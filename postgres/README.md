@@ -135,6 +135,21 @@ After a `CHECKPOINT`, the data files on disk represent a **complete, consistent 
 
 **No lock is needed.** PostgreSQL's WAL guarantees that any snapshot can be made consistent. The `CHECKPOINT` simply ensures the snapshot starts from the cleanest possible point, minimizing recovery time.
 
+### What happens to transactions between CHECKPOINT and the snapshot?
+
+The database keeps running normally in that gap. Any transactions that commit write their changes to the **WAL on disk first** — that is the entire point of Write-Ahead Logging. The snapshot captures the whole PVC, which includes both the data files and the WAL files.
+
+When PostgreSQL starts after a restore, it enters crash recovery and replays the WAL forward from the last checkpoint. Any transaction that committed before the snapshot was taken will have a commit record in the captured WAL, so it gets replayed and recovered. Any transaction that was still in-flight when the snapshot was taken has no commit record, so crash recovery ignores it — exactly as if the server had crashed mid-transaction.
+
+On a busy database this means hundreds of transactions may commit between the CHECKPOINT and the snapshot — all of them are recovered via WAL replay. The only data that cannot be recovered is transactions that committed *after* the snapshot was taken, which is the definition of RPO for any backup system.
+
+```
+CHECKPOINT ──── [transactions keep committing] ──── SNAPSHOT
+               ↑                                    ↑
+               WAL records these to disk             Snapshot captures WAL + data files
+               They are recovered on restore         Post-snapshot commits are lost
+```
+
 ### Why `pg_switch_wal()` for the post-hook?
 
 After the snapshot is complete, `pg_switch_wal()` forces a switch to a new WAL segment file. This creates a **clean boundary** in the WAL stream at the exact point the backup was taken. If you later use Point-In-Time Recovery (PITR) to restore to the moment of the backup, you know exactly which WAL segment the backup covers.
