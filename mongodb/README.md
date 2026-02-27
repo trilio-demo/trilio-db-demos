@@ -31,7 +31,7 @@ kubectl get backupplan mongodb-backupplan -o jsonpath='{.spec.hookConfig}' -n tr
 
 # STEP 5 — Trigger the backup (writer will briefly pause during snapshot — this is expected)
 kubectl apply -f trilio/backup.yaml -n trilio-demo
-kubectl get backup mongodb-demo-backup -n trilio-demo -w
+kubectl get backups.triliovault.trilio.io mongodb-demo-backup -n trilio-demo -w
 
 # STEP 6 — Simulate disaster
 kubectl delete namespace trilio-demo

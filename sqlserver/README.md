@@ -42,7 +42,7 @@ kubectl get backupplan sqlserver-backupplan -o jsonpath='{.spec.hookConfig}' -n 
 
 # STEP 5 — Trigger the backup (writer keeps running throughout)
 kubectl apply -f trilio/backup.yaml -n trilio-demo
-kubectl get backup sqlserver-demo-backup -n trilio-demo -w
+kubectl get backups.triliovault.trilio.io sqlserver-demo-backup -n trilio-demo -w
 
 # STEP 6 — Simulate disaster
 kubectl delete namespace trilio-demo

@@ -5,4 +5,4 @@ metadata:
 spec:
   backupPlan:
     name: mariadb-backupplan
-  backupType: Full
+  type: Full

@@ -31,7 +31,7 @@ kubectl get backupplan mariadb-backupplan -o jsonpath='{.spec.hookConfig}' -n tr
 
 # STEP 5 — Trigger the backup (writer keeps running throughout)
 kubectl apply -f trilio/backup.yaml -n trilio-demo
-kubectl get backup mariadb-demo-backup -n trilio-demo -w
+kubectl get backups.triliovault.trilio.io mariadb-demo-backup -n trilio-demo -w
 
 # STEP 6 — Simulate disaster
 kubectl delete namespace trilio-demo
