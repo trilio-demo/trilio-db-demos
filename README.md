@@ -1,5 +1,8 @@
 # Trilio for Kubernetes Database Backup Demo
 
+> **⚠️ DEMO PURPOSES ONLY**
+> This repository is intended for demonstration and evaluation. The hooks, manifests, and configurations have not been validated for production workloads. **Customer validation and testing in your own environment is required before using any of this in production.**
+
 A collection of ready-to-use Kubernetes manifests demonstrating **application-consistent database backups** with [Trilio for Kubernetes](https://trilio.io). Each database shows continuous writes surviving a backup with zero data loss, verified post-restore.
 
 ---
