@@ -10,22 +10,23 @@ spec:
       name: <YOUR_TARGET_NAME>       # ← replace with your Target CR name
       namespace: <YOUR_TARGET_NS>    # ← replace with your Target CR namespace
 
-    # ─── HOOK CONFIGURATION ─────────────────────────────────────────────────
-    hookConfig:
-      # sequential: hooks run one after another (safest for a single-pod DB)
-      mode: sequential
-      hooks:
-        - hook:
-            name: postgres-hook
-            namespace: trilio-demo   # ← replace with the namespace where you applied the Hook
-          # Select the pod(s) to run the hook in.
-          # This matches the label app=postgres set on the StatefulSet pods.
-          podSelector:
-            labels:
-              - matchLabels:
-                  app: postgres
-          # Run the hook only in the container named "postgres"
-          containerRegex: "postgres"
+  # ─── HOOK CONFIGURATION ─────────────────────────────────────────────────
+  # hookConfig is a top-level spec field, NOT nested under backupConfig.
+  hookConfig:
+    # Sequential: hooks run one after another (safest for a single-pod DB)
+    mode: Sequential
+    hooks:
+      - hook:
+          name: postgres-hook
+          namespace: trilio-demo   # ← replace with the namespace where you applied the Hook
+        # Select the pod(s) to run the hook in.
+        # This matches the label app=postgres set on the StatefulSet pods.
+        podSelector:
+          labels:
+            - matchLabels:
+                app: postgres
+        # Run the hook only in the container named "postgres"
+        containerRegex: "postgres"
 
   # ─── WHAT TO BACK UP ────────────────────────────────────────────────────────
   # Back up the entire namespace. This captures the StatefulSet, PVC, Secrets,

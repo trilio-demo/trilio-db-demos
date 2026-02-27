@@ -7,15 +7,15 @@ spec:
     target:
       name: <YOUR_TARGET_NAME>       # ← replace with your Target CR name
       namespace: <YOUR_TARGET_NS>    # ← replace with your Target CR namespace
-    hookConfig:
-      mode: sequential
-      hooks:
-        - hook:
-            name: mariadb-hook
-            namespace: trilio-demo   # ← replace with the namespace where you applied the Hook
-          podSelector:
-            labels:
-              - matchLabels:
-                  app: mariadb
-          containerRegex: "mariadb"
+  hookConfig:
+    mode: Sequential
+    hooks:
+      - hook:
+          name: mariadb-hook
+          namespace: trilio-demo   # ← replace with the namespace where you applied the Hook
+        podSelector:
+          labels:
+            - matchLabels:
+                app: mariadb
+        containerRegex: "mariadb"
   backupPlanComponents: {}
