@@ -112,6 +112,42 @@ ConfigMap with the PostgreSQL configuration parameters that enable WAL archiving
 
 ---
 
+## How Recovery Works
+
+Recovery happens in two phases. Understanding the boundary between them is key.
+
+**Phase 1 — T4K restores the base**
+
+T4K recreates the PVC from the snapshot and starts the pod. PostgreSQL enters crash recovery and replays the WAL files that were captured inside the snapshot. This brings the database to the exact state it was in at snapshot time — no more, no less.
+
+**Phase 2 — WAL-G replays from S3**
+
+If you configure `restore_command`, PostgreSQL doesn't stop at the end of the local WAL. It calls WAL-G to fetch the next WAL segment from S3, then the next, and keeps replaying until it reaches your `recovery_target_time`. This is how you recover past the snapshot point.
+
+```
+T4K snapshot                                  target time
+     │                                              │
+     ▼                                              ▼
+─────●──────────────────────────────────────────────●──── time
+     │◄── Phase 1: local WAL in snapshot ──►│◄─ Phase 2: WAL from S3 ──►│
+     │    (crash recovery, automatic)        │   (wal-g wal-fetch)        │
+```
+
+**The pg_switch_wal() connection**
+
+The post-hook forces a WAL segment boundary at the exact moment of the snapshot. WAL-G archives that segment to S3 immediately. Without this, the segment at snapshot time might sit half-filled for minutes before being archived, creating a gap between Phase 1 and Phase 2 where no WAL is available in S3.
+
+**What you recover**
+
+| Transaction | Where | Recovered? |
+|---|---|---|
+| Committed before snapshot | Local WAL in PVC | ✅ Phase 1 |
+| Committed after snapshot, before target time | S3 via WAL-G | ✅ Phase 2 |
+| In-flight at snapshot time | No commit record anywhere | ❌ Rolled back |
+| Committed after target time | Intentionally excluded | ❌ By design |
+
+---
+
 ## PITR Recovery Procedure
 
 After a Trilio for Kubernetes restore, PostgreSQL will start with the state from the snapshot. To replay WAL forward to a specific point:
