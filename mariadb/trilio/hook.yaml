@@ -34,7 +34,7 @@ spec:
       command:
         - "bash"
         - "-c"
-        - "MYSQL_PWD=$MARIADB_ROOT_PASSWORD mysql --user=root --connect-timeout=10 -Bse 'FLUSH TABLES; FLUSH BINARY LOGS;'"
+        - "MYSQL_PWD=$MARIADB_ROOT_PASSWORD mariadb --user=root --connect-timeout=10 -Bse 'FLUSH TABLES; FLUSH BINARY LOGS;'"
     ignoreFailure: false
     maxRetryCount: 2
     timeoutSeconds: 60
@@ -50,7 +50,7 @@ spec:
       command:
         - "bash"
         - "-c"
-        - "MYSQL_PWD=$MARIADB_ROOT_PASSWORD mysql --user=root --connect-timeout=10 -Bse 'FLUSH BINARY LOGS;'"
+        - "MYSQL_PWD=$MARIADB_ROOT_PASSWORD mariadb --user=root --connect-timeout=10 -Bse 'FLUSH BINARY LOGS;'"
     ignoreFailure: true   # Snapshot is already done; this is a PITR aid only
     maxRetryCount: 1
     timeoutSeconds: 30
