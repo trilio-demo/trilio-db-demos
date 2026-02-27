@@ -19,23 +19,35 @@ SQL Server has stricter infrastructure requirements than the other databases:
 ## Demo Flow
 
 ```bash
+# STEP 1 — Create namespace and deploy SQL Server
+#          SQL Server takes 30–60s to initialize — wait for ready before proceeding
 kubectl create namespace trilio-demo
-kubectl apply -f deploy/  -n trilio-demo
-kubectl apply -f writer/  -n trilio-demo
-
-# SQL Server takes 30–60s to initialize — wait for ready
+kubectl apply -f deploy/ -n trilio-demo
 kubectl rollout status statefulset/sqlserver -n trilio-demo
 
-kubectl apply -f trilio/ -n trilio-demo    # edit backupplan.yaml target first
+# STEP 2 — Start the continuous writer
+kubectl apply -f writer/ -n trilio-demo
 
-# Watch writes in a second terminal
+# Terminal 2 — confirm rows are being written (keep open during backup)
 kubectl logs -f deployment/sqlserver-writer -n trilio-demo
 
-# Trigger backup
+# STEP 3 — Edit backupplan.yaml: set target name/namespace, then apply Hook + BackupPlan
+#          ⚠️  Do NOT apply the whole trilio/ folder — backup.yaml triggers a backup immediately
+kubectl apply -f trilio/hook.yaml -n trilio-demo
+kubectl apply -f trilio/backupplan.yaml -n trilio-demo
+
+# STEP 4 — Verify BackupPlan is Available and hook is registered
+kubectl get backupplan sqlserver-backupplan -n trilio-demo
+kubectl get backupplan sqlserver-backupplan -o jsonpath='{.spec.hookConfig}' -n trilio-demo
+
+# STEP 5 — Trigger the backup (writer keeps running throughout)
 kubectl apply -f trilio/backup.yaml -n trilio-demo
 kubectl get backup sqlserver-demo-backup -n trilio-demo -w
 
-# After restore — verify consistency
+# STEP 6 — Simulate disaster
+kubectl delete namespace trilio-demo
+
+# STEP 7 — Restore via T4K (UI or CLI), then run consistency checker
 kubectl delete job sqlserver-consistency-checker -n trilio-demo --ignore-not-found
 kubectl apply -f checker/ -n trilio-demo
 kubectl logs -f job/sqlserver-consistency-checker -n trilio-demo
