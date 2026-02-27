@@ -49,41 +49,74 @@ kubectl logs -f job/postgres-consistency-checker -n trilio-demo
 
 ### Expected writer output
 
+The writer is a **Job** — it writes 10,000 rows then exits cleanly. No need to kill it.
+
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Trilio for Kubernetes Database Backup Demo — PostgreSQL Writer
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Host      : postgres-service:5432
+  Database  : demodb
+  Interval  : 1s per row
+  Target    : 10000 rows then exit
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✅ Connected to PostgreSQL!
 📋 Table 'writes_log' ready.
-📝 Starting write loop from seq #1 (1s/row). Ctrl+C to stop.
+📝 Writing 10000 rows from seq #1 at 1s/row.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [2026-02-27 10:00:01 UTC]  Row #1       seq=1         OK
 [2026-02-27 10:00:02 UTC]  Row #2       seq=2         OK
-[2026-02-27 10:00:03 UTC]  Row #3       seq=3         OK
 ...
 [2026-02-27 10:01:45 UTC]  Row #105     seq=105       OK  ← backup happening here
-[2026-02-27 10:01:46 UTC]  Row #106     seq=106       OK  ← writes continue
+[2026-02-27 10:01:46 UTC]  Row #106     seq=106       OK  ← writes continue uninterrupted
 ...
+✅ Writer complete — 10000 rows written. Job done.
 ```
 
-No pause. No error. The hook runs in milliseconds inside the container.
+### Expected checker output
 
-### Expected checker output (post-restore)
+The checker runs **twice**: once before restore (latency baseline) and once after (integrity check). Both reports should match.
 
 ```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Trilio for Kubernetes Consistency Checker — PostgreSQL
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 Results:
-   Total rows written   : 142
-   Sequence range       : 1 → 142
-   Expected (no gaps)   : 142
-   Gaps detected        : 0
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Trilio for Kubernetes — PostgreSQL Backup Consistency & Latency Report
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ✅  CONSISTENCY CHECK PASSED
-  No gaps in write sequence. Backup was crash-consistent.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 WRITE SUMMARY
+   Total rows       : 10000
+   Sequence range   : 1 → 10000 (expected 10000)
+   First write      : 2026-02-27 10:00:01 UTC
+   Last write       : 2026-02-27 12:46:41 UTC
+
+─── ① Gap Check ─────────────────────────────────────────────────────
+   ✅ PASSED — No missing sequence numbers. Backup was crash-consistent.
+
+─── ② Write Latency (inter-row intervals) ───────────────────────────
+   Expected interval : ~1000ms  (1 row/sec)
+   p50               : 1001ms
+   p95               : 1089ms
+   p99               : 2341ms
+   max               : 4210ms
+
+─── ③ Write Stalls (interval > 2× expected = >2000ms) ───────────────
+   ⚠️  Stalls detected (rows where write was delayed >2s):
+   seq_num     time              interval
+   ──────────  ────────────────  ──────────
+   4821        10:41:03.142      4210ms   ← coincides with CHECKPOINT hook
+   4822        10:41:07.353      2341ms
+
+─── ④ Write Rate Timeline (rows per 10-second bucket) ───────────────
+   (a dip here during the backup window shows hook/snapshot impact)
+
+   10:39:00  ██████████  10 rows
+   10:39:10  ██████████  10 rows
+   10:39:20  ██████       6 rows  ← backup window (CHECKPOINT + snapshot)
+   10:39:30  ██████████  10 rows
+   10:39:40  ██████████  10 rows
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✅  OVERALL: PASSED — data is complete and consistent
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
 ---
