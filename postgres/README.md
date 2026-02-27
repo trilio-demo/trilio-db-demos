@@ -2,23 +2,23 @@
 
 ## Overview
 
-This demo deploys **PostgreSQL 17** on Kubernetes, runs a continuous writer to insert rows every second, and takes an application-consistent backup using Trilio for Kubernetes hooks. After a restore, a consistency checker verifies zero gaps in the write sequence.
+This demo deploys **PostgreSQL 17** on Kubernetes, runs a time-limited writer Job (10,000 rows, ~2.7h at 1 row/sec), and takes an application-consistent backup using Trilio for Kubernetes hooks. The consistency checker runs **twice** — before restore (to measure any write stalls during the backup window) and after restore (to verify data integrity).
 
 ---
 
 ## Demo Flow
 
-```
+```bash
 # STEP 1 — Create namespace and deploy PostgreSQL
 kubectl create namespace trilio-demo
 kubectl apply -f deploy/ -n trilio-demo
 kubectl rollout status statefulset/postgres -n trilio-demo
 
-# STEP 2 — Start the continuous writer
+# STEP 2 — Start the writer Job (writes 10,000 rows then exits automatically)
 kubectl apply -f writer/ -n trilio-demo
 
-# Terminal 2 — confirm rows are being written (keep open during backup)
-kubectl logs -f deployment/postgres-writer -n trilio-demo
+# Watch rows being written (optional, Ctrl+C safe — job keeps running)
+kubectl logs -f job/postgres-writer -n trilio-demo
 
 # STEP 3 — Edit backupplan.yaml: set target name/namespace, then apply Hook + BackupPlan
 #          ⚠️  Do NOT apply the whole trilio/ folder — backup.yaml triggers a backup immediately
@@ -33,10 +33,15 @@ kubectl get backupplan postgres-backupplan -o jsonpath='{.spec.hookConfig}' -n t
 kubectl apply -f trilio/backup.yaml -n trilio-demo
 kubectl get backups.triliovault.trilio.io postgres-demo-backup -n trilio-demo -w
 
-# STEP 6 — Simulate disaster
+# STEP 6 — Run the checker BEFORE restore (read-only, safe to run anytime)
+#          This shows the latency baseline and any write stalls during the backup window
+kubectl apply -f checker/ -n trilio-demo
+kubectl logs -f job/postgres-consistency-checker -n trilio-demo
+
+# STEP 7 — Simulate disaster
 kubectl delete namespace trilio-demo
 
-# STEP 7 — Restore via T4K (UI or CLI), then run consistency checker
+# STEP 8 — Restore via T4K (UI or CLI), then run checker again to verify integrity
 kubectl delete job postgres-consistency-checker -n trilio-demo --ignore-not-found
 kubectl apply -f checker/ -n trilio-demo
 kubectl logs -f job/postgres-consistency-checker -n trilio-demo
