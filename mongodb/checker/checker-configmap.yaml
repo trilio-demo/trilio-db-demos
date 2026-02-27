@@ -1,0 +1,143 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongodb-checker-script
+data:
+  checker.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    MONGO_URI="mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongodb-service:27017/admin"
+    MONGOSH="mongosh --quiet ${MONGO_URI}"
+    DIV="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    echo "$DIV"
+    echo "  Trilio for Kubernetes — MongoDB Backup Consistency & Latency Report"
+    echo "$DIV"
+    echo ""
+
+    echo "⏳ Waiting for MongoDB..."
+    until $MONGOSH --eval "db.adminCommand('ping')" > /dev/null 2>&1; do sleep 2; done
+    echo "✅ Connected."
+    echo ""
+
+    # Run the full report as a single mongosh script to avoid multiple connections
+    $MONGOSH --eval "
+      use ${MONGO_DATABASE};
+      const DIV = '━'.repeat(66);
+
+      // ── Summary ──────────────────────────────────────────────────────────
+      const total = db.writes_log.countDocuments();
+      const minDoc = db.writes_log.find({},{seq_num:1}).sort({seq_num:1}).limit(1).toArray()[0];
+      const maxDoc = db.writes_log.find({},{seq_num:1}).sort({seq_num:-1}).limit(1).toArray()[0];
+      const minSeq = minDoc ? minDoc.seq_num : 0;
+      const maxSeq = maxDoc ? maxDoc.seq_num : 0;
+      const expected = maxSeq - minSeq + 1;
+      const firstTs = db.writes_log.find({},{written_at:1}).sort({seq_num:1}).limit(1).toArray()[0]?.written_at;
+      const lastTs  = db.writes_log.find({},{written_at:1}).sort({seq_num:-1}).limit(1).toArray()[0]?.written_at;
+
+      print('📋 WRITE SUMMARY');
+      print('   Total docs       : ' + total);
+      print('   Sequence range   : ' + minSeq + ' → ' + maxSeq + ' (expected ' + expected + ')');
+      print('   First write      : ' + firstTs);
+      print('   Last write       : ' + lastTs);
+      print('');
+
+      // ── ① Gap Check ──────────────────────────────────────────────────────
+      print('─── ① Gap Check ─────────────────────────────────────────────────────');
+      const gapDocs = db.writes_log.aggregate([
+        { \$sort: { seq_num: 1 } },
+        { \$setWindowFields: { sortBy: { seq_num: 1 },
+            output: { prevSeq: { \$shift: { output: '\$seq_num', by: -1 } } } } },
+        { \$match: { \$expr: { \$and: [
+            { \$ne: ['\$prevSeq', null] },
+            { \$gt: [{ \$subtract: ['\$seq_num', '\$prevSeq'] }, 1] }
+        ]}}}
+      ]).toArray();
+      const gaps = gapDocs.length;
+
+      if (gaps === 0 && total === expected) {
+        print('   ✅ PASSED — No missing sequence numbers. Backup was crash-consistent.');
+      } else {
+        print('   ❌ FAILED — ' + gaps + ' gap(s) found. Expected ' + expected + ' docs, got ' + total + '.');
+      }
+      print('');
+
+      // ── ② Write Latency ───────────────────────────────────────────────────
+      print('─── ② Write Latency (inter-doc intervals) ───────────────────────────');
+      const latResult = db.writes_log.aggregate([
+        { \$sort: { seq_num: 1 } },
+        { \$setWindowFields: { sortBy: { seq_num: 1 },
+            output: { prevTs: { \$shift: { output: '\$written_at', by: -1 } } } } },
+        { \$match: { prevTs: { \$ne: null } } },
+        { \$addFields: { interval_ms: { \$subtract: ['\$written_at', '\$prevTs'] } } },
+        { \$group: { _id: null,
+            p50: { \$percentile: { input: '\$interval_ms', p: [0.50], method: 'approximate' } },
+            p95: { \$percentile: { input: '\$interval_ms', p: [0.95], method: 'approximate' } },
+            p99: { \$percentile: { input: '\$interval_ms', p: [0.99], method: 'approximate' } },
+            max: { \$max: '\$interval_ms' }
+        }}
+      ]).toArray();
+
+      if (latResult.length > 0) {
+        const l = latResult[0];
+        print('   Expected interval : ~1000ms  (1 doc/sec)');
+        print('   p50               : ' + Math.round(l.p50[0]) + 'ms');
+        print('   p95               : ' + Math.round(l.p95[0]) + 'ms');
+        print('   p99               : ' + Math.round(l.p99[0]) + 'ms');
+        print('   max               : ' + Math.round(l.max) + 'ms');
+      }
+      print('');
+
+      // ── ③ Stall Detection ─────────────────────────────────────────────────
+      print('─── ③ Write Stalls (interval > 2× expected = >2000ms) ───────────────');
+      print('   NOTE: A pause during the backup window is expected — it means the');
+      print('   fsyncLock write lock was held during the snapshot (correct behavior).');
+      const stalls = db.writes_log.aggregate([
+        { \$sort: { seq_num: 1 } },
+        { \$setWindowFields: { sortBy: { seq_num: 1 },
+            output: { prevTs: { \$shift: { output: '\$written_at', by: -1 } } } } },
+        { \$match: { prevTs: { \$ne: null } } },
+        { \$addFields: { interval_ms: { \$subtract: ['\$written_at', '\$prevTs'] } } },
+        { \$match: { interval_ms: { \$gt: 2000 } } },
+        { \$sort: { interval_ms: -1 } },
+        { \$limit: 10 }
+      ]).toArray();
+
+      if (stalls.length === 0) {
+        print('   ✅ No stalls detected.');
+      } else {
+        print('   seq_num     time                  interval');
+        print('   ──────────  ────────────────────  ──────────');
+        stalls.forEach(s => {
+          const ts = s.written_at.toISOString().replace('T',' ').substring(0,23);
+          print('   ' + String(s.seq_num).padEnd(10) + '  ' + ts.padEnd(20) + '  ' + Math.round(s.interval_ms) + 'ms  ← fsyncLock');
+        });
+      }
+      print('');
+
+      // ── ④ Timeline ────────────────────────────────────────────────────────
+      print('─── ④ Write Rate Timeline (docs per 10-second bucket) ───────────────');
+      const timeline = db.writes_log.aggregate([
+        { \$addFields: { bucket: { \$dateTrunc: { date: '\$written_at', unit: 'second',
+              binSize: 10 } } } },
+        { \$group: { _id: '\$bucket', cnt: { \$sum: 1 } } },
+        { \$sort: { _id: 1 } }
+      ]).toArray();
+
+      timeline.forEach(b => {
+        const t = b._id.toISOString().substring(11,19);
+        const bar = '█'.repeat(b.cnt);
+        print('   ' + t + '  ' + bar.padEnd(12) + '  ' + b.cnt + ' docs');
+      });
+
+      print('');
+      print(DIV);
+      if (gaps === 0 && total === expected) {
+        print('  ✅  OVERALL: PASSED — data is complete and consistent');
+      } else {
+        print('  ❌  OVERALL: FAILED — data integrity issues detected');
+        quit(1);
+      }
+      print(DIV);
+    "

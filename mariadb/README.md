@@ -18,7 +18,7 @@ kubectl rollout status statefulset/mariadb -n trilio-demo
 kubectl apply -f writer/ -n trilio-demo
 
 # Terminal 2 — confirm rows are being written (keep open during backup)
-kubectl logs -f deployment/mariadb-writer -n trilio-demo
+kubectl logs -f job/mariadb-writer -n trilio-demo
 
 # STEP 3 — Edit backupplan.yaml: set target name/namespace, then apply Hook + BackupPlan
 #          ⚠️  Do NOT apply the whole trilio/ folder — backup.yaml triggers a backup immediately
@@ -33,10 +33,15 @@ kubectl get backupplan mariadb-backupplan -o jsonpath='{.spec.hookConfig}' -n tr
 kubectl apply -f trilio/backup.yaml -n trilio-demo
 kubectl get backups.triliovault.trilio.io mariadb-demo-backup -n trilio-demo -w
 
-# STEP 6 — Simulate disaster
+# STEP 6 — Run checker BEFORE restore (read-only, safe to run anytime)
+#          This shows the latency baseline and any write stalls during the backup window
+kubectl apply -f checker/ -n trilio-demo
+kubectl logs -f job/mariadb-consistency-checker -n trilio-demo
+
+# STEP 7 — Simulate disaster
 kubectl delete namespace trilio-demo
 
-# STEP 7 — Restore via T4K (UI or CLI), then run consistency checker
+# STEP 8 — Restore via T4K (UI or CLI), then run consistency checker
 kubectl delete job mariadb-consistency-checker -n trilio-demo --ignore-not-found
 kubectl apply -f checker/ -n trilio-demo
 kubectl logs -f job/mariadb-consistency-checker -n trilio-demo
@@ -91,6 +96,32 @@ MyISAM does NOT have crash recovery. If your database has MyISAM tables, a lock 
 | Pre | `FLUSH TABLES` | Flush InnoDB buffer pool to disk |
 | Pre | `FLUSH BINARY LOGS` | Create a clean binary log boundary |
 | Post | `FLUSH BINARY LOGS` | Mark end of backup window in binary log |
+
+### What happens to transactions between the pre-hook and the snapshot?
+
+The database keeps accepting writes after `FLUSH TABLES` completes. Any transaction that commits in that gap writes to the InnoDB redo log first — that is the fundamental guarantee of the InnoDB storage engine. The snapshot captures the full PVC, including the redo log files.
+
+When MariaDB starts after a restore, InnoDB automatically runs crash recovery: it reads the redo log forward and replays any committed transaction whose changes weren't yet written to the `.ibd` data files. Any transaction that was in-flight (no commit record) is rolled back. The result is a fully consistent database reflecting all commits up to the snapshot moment.
+
+`FLUSH TABLES` minimises recovery time by flushing dirty pages before the snapshot, so there is less redo log replay needed. But correctness is guaranteed by the redo log regardless.
+
+```
+FLUSH TABLES ──── [transactions keep committing] ──── SNAPSHOT
+                  ↑                                    ↑
+                  Redo log records these to disk        Snapshot captures redo log + data files
+                  They are recovered on restore         Post-snapshot commits are lost
+```
+
+### Recovering with binary log archiving (WAL-G + S3)
+
+If you are archiving binary logs to S3 using WAL-G's MySQL adapter, a T4K restore alone recovers you to the snapshot point. To reach a later point in time, recovery works in two phases:
+
+1. **T4K restores the base** — the PVC is recreated. MariaDB enters InnoDB crash recovery and replays the redo log captured in the snapshot, reaching the state at snapshot time.
+2. **Binary log replay** — using `mysqlbinlog`, you replay the binary log files archived to S3 up to your target time or GTID position.
+
+The `FLUSH BINARY LOGS` in both the pre- and post-hook ensures clean binary log boundaries at the snapshot, so there is no gap between what the snapshot contains and what S3 has archived.
+
+See [`pitr/README.md`](pitr/README.md) for the full setup and recovery procedure.
 
 ---
 

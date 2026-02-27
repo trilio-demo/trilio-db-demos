@@ -1,24 +1,22 @@
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: batch/v1
+kind: Job
 metadata:
   name: sqlserver-writer
   labels:
     app: sqlserver-writer
     demo: trilio-db-demo
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: sqlserver-writer
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
   template:
     metadata:
       labels:
         app: sqlserver-writer
         demo: trilio-db-demo
     spec:
+      restartPolicy: Never
       containers:
         - name: writer
-          # Use the SQL Server image — it includes sqlcmd at /opt/mssql-tools18/bin/
           image: mcr.microsoft.com/mssql/server:2022-latest
           command: ["/bin/bash", "/scripts/writer.sh"]
           env:
@@ -30,21 +28,18 @@ spec:
                   name: sqlserver-secret
                   key: SA_PASSWORD
             - name: MSSQL_DATABASE
-              valueFrom:
-                secretKeyRef:
-                  name: sqlserver-secret
-                  key: MSSQL_DATABASE
+              value: "demodb"
             - name: WRITE_INTERVAL
               value: "1"
-            - name: ACCEPT_EULA
-              value: "Y"
+            - name: STOP_AFTER_ROWS
+              value: "10000"
           resources:
             requests:
-              cpu: 100m
-              memory: 256Mi
+              cpu: 50m
+              memory: 128Mi
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: 200m
+              memory: 256Mi
           volumeMounts:
             - name: scripts
               mountPath: /scripts

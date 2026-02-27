@@ -10,6 +10,7 @@ data:
     DB_HOST="${DB_HOST:-mongodb-service}"
     DB_PORT="${DB_PORT:-27017}"
     WRITE_INTERVAL="${WRITE_INTERVAL:-1}"
+    STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-10000}"
 
     MONGO_URI="mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@${DB_HOST}:${DB_PORT}/admin"
     MONGOSH="mongosh --quiet ${MONGO_URI}"
@@ -17,9 +18,10 @@ data:
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  Trilio for Kubernetes Database Backup Demo — MongoDB Writer"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Host     : ${DB_HOST}:${DB_PORT}"
-    echo "  Database : ${MONGO_DATABASE}"
-    echo "  Interval : ${WRITE_INTERVAL}s per document"
+    echo "  Host      : ${DB_HOST}:${DB_PORT}"
+    echo "  Database  : ${MONGO_DATABASE}"
+    echo "  Interval  : ${WRITE_INTERVAL}s per document"
+    echo "  Target    : ${STOP_AFTER_ROWS} documents then exit"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     echo "⏳ Waiting for MongoDB at ${DB_HOST}:${DB_PORT}..."
@@ -30,7 +32,6 @@ data:
     echo "✅ Connected to MongoDB!"
     echo ""
 
-    # Get the starting sequence number
     LAST_SEQ=$($MONGOSH --eval "
       use ${MONGO_DATABASE};
       const doc = db.writes_log.find().sort({seq_num:-1}).limit(1).toArray();
@@ -38,10 +39,10 @@ data:
     " 2>/dev/null | tail -1 || echo "0")
     seq_num=$((LAST_SEQ + 1))
 
-    echo "📝 Starting write loop from seq #${seq_num} (${WRITE_INTERVAL}s/doc). Ctrl+C to stop."
+    echo "📝 Writing ${STOP_AFTER_ROWS} documents from seq #${seq_num} at ${WRITE_INTERVAL}s/doc."
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    while true; do
+    while [ "$seq_num" -le "$((LAST_SEQ + STOP_AFTER_ROWS))" ]; do
       ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
       if $MONGOSH --eval "
         use ${MONGO_DATABASE};
@@ -60,3 +61,8 @@ data:
       fi
       sleep "${WRITE_INTERVAL}"
     done
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "✅ Writer complete — ${STOP_AFTER_ROWS} documents written. Job done."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

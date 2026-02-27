@@ -3,6 +3,7 @@ kind: Job
 metadata:
   name: mongodb-consistency-checker
 spec:
+  backoffLimit: 0
   ttlSecondsAfterFinished: 600
   template:
     spec:
@@ -10,71 +11,7 @@ spec:
       containers:
         - name: checker
           image: mongo:8.0
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              MONGO_URI="mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongodb-service:27017/admin"
-              MONGOSH="mongosh --quiet ${MONGO_URI}"
-
-              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-              echo "  Trilio for Kubernetes Consistency Checker — MongoDB"
-              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-              echo "⏳ Waiting for MongoDB..."
-              until $MONGOSH --eval "db.adminCommand('ping')" > /dev/null 2>&1; do sleep 2; done
-              echo "✅ Connected."
-              echo ""
-
-              RESULT=$($MONGOSH --eval "
-                use ${MONGO_DATABASE};
-                const total = db.writes_log.countDocuments();
-                const minSeq = db.writes_log.find().sort({seq_num:1}).limit(1).toArray()[0]?.seq_num ?? 0;
-                const maxSeq = db.writes_log.find().sort({seq_num:-1}).limit(1).toArray()[0]?.seq_num ?? 0;
-                const expected = maxSeq - minSeq + 1;
-                // Find gaps: seq values where seq+1 is missing
-                const pipeline = [
-                  {'\$sort': {seq_num: 1}},
-                  {'\$group': {_id: null, seqs: {'\$push': '\$seq_num'}}},
-                  {'\$project': {
-                    gaps: {
-                      '\$size': {
-                        '\$filter': {
-                          input: {'\$range': [minSeq, maxSeq]},
-                          as: 'n',
-                          cond: {'\$not': {'\$in': ['\$\$n', '\$seqs']}}
-                        }
-                      }
-                    }
-                  }}
-                ];
-                const gapResult = db.writes_log.aggregate(pipeline).toArray();
-                const gaps = gapResult.length > 0 ? gapResult[0].gaps : 0;
-                JSON.stringify({total, minSeq, maxSeq, expected, gaps});
-              " 2>/dev/null | tail -1)
-
-              TOTAL=$(echo $RESULT | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['total'])")
-              MIN_SEQ=$(echo $RESULT | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['minSeq'])")
-              MAX_SEQ=$(echo $RESULT | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['maxSeq'])")
-              EXPECTED=$(echo $RESULT | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['expected'])")
-              GAPS=$(echo $RESULT | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['gaps'])")
-
-              echo "📊 Results:"
-              echo "   Total docs written   : ${TOTAL}"
-              echo "   Sequence range       : ${MIN_SEQ} → ${MAX_SEQ}"
-              echo "   Expected (no gaps)   : ${EXPECTED}"
-              echo "   Gaps detected        : ${GAPS}"
-              echo ""
-              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-              if [ "${GAPS}" -eq "0" ] && [ "${TOTAL}" -eq "${EXPECTED}" ]; then
-                echo "  ✅  CONSISTENCY CHECK PASSED"
-                echo "  No gaps in write sequence. Backup was crash-consistent."
-              else
-                echo "  ❌  CONSISTENCY CHECK FAILED"
-                echo "  Gaps: ${GAPS}. Expected ${EXPECTED} docs, found ${TOTAL}."
-                exit 1
-              fi
-              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          command: ["/bin/bash", "/scripts/checker.sh"]
           env:
             - name: MONGO_INITDB_ROOT_USERNAME
               valueFrom:
@@ -91,3 +28,11 @@ spec:
                 secretKeyRef:
                   name: mongodb-secret
                   key: MONGO_DATABASE
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: mongodb-checker-script
+            defaultMode: 0755

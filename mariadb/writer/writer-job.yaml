@@ -1,21 +1,20 @@
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: batch/v1
+kind: Job
 metadata:
   name: mariadb-writer
   labels:
     app: mariadb-writer
     demo: trilio-db-demo
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: mariadb-writer
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
   template:
     metadata:
       labels:
         app: mariadb-writer
         demo: trilio-db-demo
     spec:
+      restartPolicy: Never
       containers:
         - name: writer
           image: mariadb:11.4
@@ -35,6 +34,8 @@ spec:
                   key: MARIADB_DATABASE
             - name: WRITE_INTERVAL
               value: "1"
+            - name: STOP_AFTER_ROWS
+              value: "10000"
           resources:
             requests:
               cpu: 50m

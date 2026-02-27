@@ -11,15 +11,17 @@ data:
     DB_PORT="${DB_PORT:-1433}"
     DB_NAME="${MSSQL_DATABASE:-demodb}"
     WRITE_INTERVAL="${WRITE_INTERVAL:-1}"
+    STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-10000}"
 
     SQLCMD="/opt/mssql-tools18/bin/sqlcmd -S ${DB_HOST},${DB_PORT} -U sa -P ${SA_PASSWORD} -No"
 
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  Trilio for Kubernetes Database Backup Demo — SQL Server 2022 Writer"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Host     : ${DB_HOST}:${DB_PORT}"
-    echo "  Database : ${DB_NAME}"
-    echo "  Interval : ${WRITE_INTERVAL}s per row"
+    echo "  Host      : ${DB_HOST}:${DB_PORT}"
+    echo "  Database  : ${DB_NAME}"
+    echo "  Interval  : ${WRITE_INTERVAL}s per row"
+    echo "  Target    : ${STOP_AFTER_ROWS} rows then exit"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     echo "⏳ Waiting for SQL Server at ${DB_HOST}:${DB_PORT}..."
@@ -30,7 +32,6 @@ data:
     echo "✅ Connected to SQL Server!"
     echo ""
 
-    # Create database and table if they don't exist
     $SQLCMD -Q "
       IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = '${DB_NAME}')
       BEGIN
@@ -49,14 +50,15 @@ data:
       );
     " > /dev/null
     echo "📋 Table 'writes_log' ready."
+    echo ""
 
     LAST_SEQ=$($SQLCMD -d "${DB_NAME}" -h -1 -Q "SET NOCOUNT ON; SELECT ISNULL(MAX(seq_num),0) FROM writes_log" 2>/dev/null | tr -d ' \r\n' || echo "0")
     seq_num=$((LAST_SEQ + 1))
 
-    echo "📝 Starting write loop from seq #${seq_num} (${WRITE_INTERVAL}s/row). Ctrl+C to stop."
+    echo "📝 Writing ${STOP_AFTER_ROWS} rows from seq #${seq_num} at ${WRITE_INTERVAL}s/row."
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    while true; do
+    while [ "$seq_num" -le "$((LAST_SEQ + STOP_AFTER_ROWS))" ]; do
       ts=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
       if $SQLCMD -d "${DB_NAME}" -Q "
         INSERT INTO writes_log (seq_num, note)
@@ -71,3 +73,8 @@ data:
       fi
       sleep "${WRITE_INTERVAL}"
     done
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "✅ Writer complete — ${STOP_AFTER_ROWS} rows written. Job done."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

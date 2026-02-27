@@ -29,7 +29,7 @@ kubectl rollout status statefulset/sqlserver -n trilio-demo
 kubectl apply -f writer/ -n trilio-demo
 
 # Terminal 2 — confirm rows are being written (keep open during backup)
-kubectl logs -f deployment/sqlserver-writer -n trilio-demo
+kubectl logs -f job/sqlserver-writer -n trilio-demo
 
 # STEP 3 — Edit backupplan.yaml: set target name/namespace, then apply Hook + BackupPlan
 #          ⚠️  Do NOT apply the whole trilio/ folder — backup.yaml triggers a backup immediately
@@ -44,10 +44,15 @@ kubectl get backupplan sqlserver-backupplan -o jsonpath='{.spec.hookConfig}' -n 
 kubectl apply -f trilio/backup.yaml -n trilio-demo
 kubectl get backups.triliovault.trilio.io sqlserver-demo-backup -n trilio-demo -w
 
-# STEP 6 — Simulate disaster
+# STEP 6 — Run checker BEFORE restore (read-only, safe to run anytime)
+#          This shows the latency baseline and any write stalls during the backup window
+kubectl apply -f checker/ -n trilio-demo
+kubectl logs -f job/sqlserver-consistency-checker -n trilio-demo
+
+# STEP 7 — Simulate disaster
 kubectl delete namespace trilio-demo
 
-# STEP 7 — Restore via T4K (UI or CLI), then run consistency checker
+# STEP 8 — Restore via T4K (UI or CLI), then run consistency checker
 kubectl delete job sqlserver-consistency-checker -n trilio-demo --ignore-not-found
 kubectl apply -f checker/ -n trilio-demo
 kubectl logs -f job/sqlserver-consistency-checker -n trilio-demo
@@ -102,6 +107,30 @@ A volume snapshot of SQL Server is always crash-consistent, with or without a pr
 |---|---|---|
 | Pre | `CHECKPOINT` | Flush buffer pool to data files |
 | Post | `CHECKPOINT` | Optional: clean boundary post-snapshot |
+
+### What happens to transactions between the pre-hook and the snapshot?
+
+The story here is essentially the same as PostgreSQL. SQL Server uses write-ahead logging — every committed transaction is written to the transaction log (`.ldf`) before the data pages are modified. After `CHECKPOINT`, writes keep coming. Any transaction that commits in the gap between CHECKPOINT and snapshot has its log records captured in the snapshot.
+
+When SQL Server starts after a restore, it runs automatic crash recovery: it reads the transaction log forward from the last checkpoint, replays committed transactions whose data pages weren't yet written to disk, and rolls back any in-flight transactions with no commit record. No manual steps are needed — this happens automatically before SQL Server opens for connections.
+
+```
+CHECKPOINT ──── [transactions keep committing] ──── SNAPSHOT
+                ↑                                    ↑
+                Transaction log records these         Snapshot captures log + data files
+                They are recovered on restore         Post-snapshot commits are lost
+```
+
+On a busy database, many transactions may commit between CHECKPOINT and snapshot. All are recovered via log replay. The CHECKPOINT reduces recovery time by establishing a recent starting point, but correctness is guaranteed by the transaction log regardless.
+
+### Recovering with transaction log backups (native S3)
+
+SQL Server 2022 has native S3 support — no external tool needed. If you are taking regular `BACKUP LOG ... TO URL` transaction log backups, a T4K restore alone recovers you to the snapshot point. To recover to a later point:
+
+1. **T4K restores the base** — the PVC is recreated. SQL Server runs automatic crash recovery and reaches the state at snapshot time.
+2. **Transaction log restore** — apply each `BACKUP LOG` file in sequence using `RESTORE LOG ... WITH NORECOVERY`, finishing with `RESTORE LOG ... WITH RECOVERY, STOPAT = '...'` to reach your exact target time.
+
+See [`pitr/README.md`](pitr/README.md) for the full setup and step-by-step recovery procedure.
 
 ---
 

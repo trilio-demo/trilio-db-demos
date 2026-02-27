@@ -1,0 +1,142 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sqlserver-checker-script
+data:
+  checker.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    DB_NAME="${MSSQL_DATABASE:-demodb}"
+    SQLCMD="/opt/mssql-tools18/bin/sqlcmd -S sqlserver-service,1433 -U sa -P ${SA_PASSWORD} -No -d ${DB_NAME}"
+    DIV="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    echo "$DIV"
+    echo "  Trilio for Kubernetes — SQL Server Backup Consistency & Latency Report"
+    echo "$DIV"
+    echo ""
+
+    echo "⏳ Waiting for SQL Server..."
+    until $SQLCMD -Q "SELECT 1" > /dev/null 2>&1; do sleep 3; done
+    echo "✅ Connected."
+    echo ""
+
+    run() { $SQLCMD -h -1 -Q "SET NOCOUNT ON; $1" 2>/dev/null | tr -d '\r' | grep -v '^$' | head -1; }
+
+    TOTAL=$(run "SELECT COUNT(*) FROM writes_log;")
+    MIN_SEQ=$(run "SELECT MIN(seq_num) FROM writes_log;")
+    MAX_SEQ=$(run "SELECT MAX(seq_num) FROM writes_log;")
+    EXPECTED=$((MAX_SEQ - MIN_SEQ + 1))
+    START_TS=$(run "SELECT CONVERT(VARCHAR,MIN(written_at),120) FROM writes_log;")
+    END_TS=$(run "SELECT CONVERT(VARCHAR,MAX(written_at),120) FROM writes_log;")
+
+    echo "📋 WRITE SUMMARY"
+    echo "   Total rows       : ${TOTAL}"
+    echo "   Sequence range   : ${MIN_SEQ} → ${MAX_SEQ} (expected ${EXPECTED})"
+    echo "   First write      : ${START_TS} UTC"
+    echo "   Last write       : ${END_TS} UTC"
+    echo ""
+
+    echo "─── ① Gap Check ─────────────────────────────────────────────────────"
+    GAPS=$(run "
+      SELECT COUNT(*) FROM writes_log w1
+      WHERE NOT EXISTS (
+        SELECT 1 FROM writes_log w2 WHERE w2.seq_num = w1.seq_num + 1
+      ) AND w1.seq_num < (SELECT MAX(seq_num) FROM writes_log);
+    ")
+    if [ "${GAPS}" -eq "0" ] && [ "${TOTAL}" -eq "${EXPECTED}" ]; then
+      echo "   ✅ PASSED — No missing sequence numbers. Backup was crash-consistent."
+    else
+      echo "   ❌ FAILED — ${GAPS} gap(s) found. Expected ${EXPECTED} rows, got ${TOTAL}."
+    fi
+    echo ""
+
+    echo "─── ② Write Latency (inter-row intervals) ───────────────────────────"
+    LATENCY=$($SQLCMD -h -1 -Q "
+      SET NOCOUNT ON;
+      WITH intervals AS (
+        SELECT DATEDIFF(MILLISECOND,
+          LAG(written_at) OVER (ORDER BY seq_num), written_at) AS ms
+        FROM writes_log
+      )
+      SELECT TOP 1
+        CAST(ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY ms) OVER (),0) AS BIGINT),
+        CAST(ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ms) OVER (),0) AS BIGINT),
+        CAST(ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY ms) OVER (),0) AS BIGINT),
+        MAX(ms) OVER ()
+      FROM intervals WHERE ms IS NOT NULL;
+    " 2>/dev/null | tr -d '\r' | grep -v '^$' | head -1)
+
+    P50=$(echo "$LATENCY" | awk '{print $1}')
+    P95=$(echo "$LATENCY" | awk '{print $2}')
+    P99=$(echo "$LATENCY" | awk '{print $3}')
+    MAX=$(echo "$LATENCY" | awk '{print $4}')
+
+    echo "   Expected interval : ~1000ms  (1 row/sec)"
+    echo "   p50               : ${P50}ms"
+    echo "   p95               : ${P95}ms"
+    echo "   p99               : ${P99}ms"
+    echo "   max               : ${MAX}ms"
+    echo ""
+
+    echo "─── ③ Write Stalls (interval > 2× expected = >2000ms) ───────────────"
+    STALLS=$($SQLCMD -h -1 -Q "
+      SET NOCOUNT ON;
+      WITH intervals AS (
+        SELECT seq_num, written_at,
+          DATEDIFF(MILLISECOND,
+            LAG(written_at) OVER (ORDER BY seq_num), written_at) AS ms
+        FROM writes_log
+      )
+      SELECT TOP 10 seq_num,
+        CONVERT(VARCHAR, written_at, 114) AS ts,
+        ms
+      FROM intervals
+      WHERE ms > 2000
+      ORDER BY ms DESC;
+    " 2>/dev/null | tr -d '\r' | grep -v '^$' | grep -v '\-\-\-')
+
+    if [ -z "$STALLS" ]; then
+      echo "   ✅ No stalls detected — hook and snapshot did not delay writes."
+    else
+      echo "   ⚠️  Stalls detected (rows where write was delayed >2s):"
+      printf "   %-10s  %-16s  %s\n" "seq_num" "time" "interval"
+      printf "   %-10s  %-16s  %s\n" "──────────" "────────────────" "──────────"
+      echo "$STALLS" | while read -r seq ts ms; do
+        printf "   %-10s  %-16s  %sms\n" "$seq" "$ts" "$ms"
+      done
+    fi
+    echo ""
+
+    echo "─── ④ Write Rate Timeline (rows per 10-second bucket) ───────────────"
+    TIMELINE=$($SQLCMD -h -1 -Q "
+      SET NOCOUNT ON;
+      SELECT
+        CONVERT(VARCHAR(8),
+          DATEADD(SECOND,
+            (DATEDIFF(SECOND, CAST(CAST(written_at AS DATE) AS DATETIME2), written_at) / 10) * 10,
+            CAST(CAST(written_at AS DATE) AS DATETIME2)
+          ), 108) AS bucket,
+        COUNT(*) AS cnt
+      FROM writes_log
+      GROUP BY
+        DATEADD(SECOND,
+          (DATEDIFF(SECOND, CAST(CAST(written_at AS DATE) AS DATETIME2), written_at) / 10) * 10,
+          CAST(CAST(written_at AS DATE) AS DATETIME2))
+      ORDER BY bucket;
+    " 2>/dev/null | tr -d '\r' | grep -v '^$' | grep -v '\-\-\-')
+
+    echo "$TIMELINE" | while read -r bucket cnt; do
+      bar=$(python3 -c "print('█' * int('$cnt'))" 2>/dev/null || printf '%0.s#' $(seq 1 $cnt))
+      printf "   %s  %-12s  %s rows\n" "$bucket" "$bar" "$cnt"
+    done
+
+    echo ""
+    echo "$DIV"
+    if [ "${GAPS}" -eq "0" ] && [ "${TOTAL}" -eq "${EXPECTED}" ]; then
+      echo "  ✅  OVERALL: PASSED — data is complete and consistent"
+    else
+      echo "  ❌  OVERALL: FAILED — data integrity issues detected"
+      exit 1
+    fi
+    echo "$DIV"

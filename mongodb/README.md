@@ -18,7 +18,7 @@ kubectl rollout status statefulset/mongodb -n trilio-demo
 kubectl apply -f writer/ -n trilio-demo
 
 # Terminal 2 — confirm rows are being written (keep open during backup)
-kubectl logs -f deployment/mongodb-writer -n trilio-demo
+kubectl logs -f job/mongodb-writer -n trilio-demo
 
 # STEP 3 — Edit backupplan.yaml: set target name/namespace, then apply Hook + BackupPlan
 #          ⚠️  Do NOT apply the whole trilio/ folder — backup.yaml triggers a backup immediately
@@ -33,10 +33,15 @@ kubectl get backupplan mongodb-backupplan -o jsonpath='{.spec.hookConfig}' -n tr
 kubectl apply -f trilio/backup.yaml -n trilio-demo
 kubectl get backups.triliovault.trilio.io mongodb-demo-backup -n trilio-demo -w
 
-# STEP 6 — Simulate disaster
+# STEP 6 — Run checker BEFORE restore (read-only, safe to run anytime)
+#          This shows the latency baseline and any write stalls during the backup window
+kubectl apply -f checker/ -n trilio-demo
+kubectl logs -f job/mongodb-consistency-checker -n trilio-demo
+
+# STEP 7 — Simulate disaster
 kubectl delete namespace trilio-demo
 
-# STEP 7 — Restore via T4K (UI or CLI), then run consistency checker
+# STEP 8 — Restore via T4K (UI or CLI), then run consistency checker
 kubectl delete job mongodb-consistency-checker -n trilio-demo --ignore-not-found
 kubectl apply -f checker/ -n trilio-demo
 kubectl logs -f job/mongodb-consistency-checker -n trilio-demo
@@ -99,6 +104,31 @@ To manually unlock a stuck database: `mongosh --eval "db.adminCommand({fsyncUnlo
 |---|---|---|
 | Pre | `{fsync:1, lock:true}` | Flush WiredTiger cache + acquire global write lock |
 | Post | `{fsyncUnlock:1}` | Release the global write lock |
+
+### What happens to transactions between the pre-hook and the snapshot?
+
+**Nothing — and that is the point.** Unlike PostgreSQL and MariaDB, MongoDB's `fsyncLock` blocks all writes at the server level. No transaction can commit after the lock is acquired. The snapshot is taken of a fully quiesced, frozen state.
+
+This means there are no in-flight transactions to worry about, no redo log replay, and no crash recovery needed for consistency. The snapshot is a clean, exact point in time.
+
+```
+fsyncLock ──── [ALL WRITES BLOCKED] ──── SNAPSHOT ──── fsyncUnlock ──── [writes resume]
+               ↑                                        ↑
+               No transactions can commit here          Lock released, queue drains
+```
+
+The writer pause you see in the logs during the backup window is not a problem — it is the proof the lock is working correctly. Writes that arrive during the lock are queued by the MongoDB driver and execute immediately after `fsyncUnlock`.
+
+This is the strongest consistency guarantee of the four databases in this demo. The trade-off is a brief write freeze during the snapshot. For most applications this is acceptable; for latency-sensitive workloads, consider scheduling backups during low-traffic windows.
+
+### Recovering with oplog archiving (WAL-G + S3)
+
+If you are archiving the MongoDB oplog to S3 using WAL-G's oplog-push, a T4K restore alone recovers you to the snapshot point. To recover to a later point:
+
+1. **T4K restores the base** — the PVC is recreated. MongoDB starts cleanly from the locked, consistent snapshot state. No crash recovery is needed because `fsyncLock` guaranteed no writes were in flight.
+2. **Oplog replay** — WAL-G fetches oplog entries from S3 and replays them up to your target timestamp using `wal-g oplog-replay`.
+
+See [`pitr/README.md`](pitr/README.md) for the full setup and recovery procedure.
 
 ---
 

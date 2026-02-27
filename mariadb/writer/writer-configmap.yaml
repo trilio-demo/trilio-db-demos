@@ -10,6 +10,7 @@ data:
     DB_HOST="${DB_HOST:-mariadb-service}"
     DB_PORT="${DB_PORT:-3306}"
     WRITE_INTERVAL="${WRITE_INTERVAL:-1}"
+    STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-10000}"
 
     export MYSQL_PWD="${MARIADB_ROOT_PASSWORD}"
     MYSQL="mysql -h ${DB_HOST} -P ${DB_PORT} -u root -D ${MARIADB_DATABASE} -Bse"
@@ -17,9 +18,10 @@ data:
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  Trilio for Kubernetes Database Backup Demo — MariaDB Writer"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Host     : ${DB_HOST}:${DB_PORT}"
-    echo "  Database : ${MARIADB_DATABASE}"
-    echo "  Interval : ${WRITE_INTERVAL}s per row"
+    echo "  Host      : ${DB_HOST}:${DB_PORT}"
+    echo "  Database  : ${MARIADB_DATABASE}"
+    echo "  Interval  : ${WRITE_INTERVAL}s per row"
+    echo "  Target    : ${STOP_AFTER_ROWS} rows then exit"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     echo "⏳ Waiting for MariaDB at ${DB_HOST}:${DB_PORT}..."
@@ -39,14 +41,15 @@ data:
       );
     " > /dev/null
     echo "📋 Table 'writes_log' ready."
+    echo ""
 
     LAST_SEQ=$($MYSQL "SELECT COALESCE(MAX(seq_num), 0) FROM writes_log;" 2>/dev/null || echo "0")
     seq_num=$((LAST_SEQ + 1))
 
-    echo "📝 Starting write loop from seq #${seq_num} (${WRITE_INTERVAL}s/row). Ctrl+C to stop."
+    echo "📝 Writing ${STOP_AFTER_ROWS} rows from seq #${seq_num} at ${WRITE_INTERVAL}s/row."
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    while true; do
+    while [ "$seq_num" -le "$((LAST_SEQ + STOP_AFTER_ROWS))" ]; do
       ts=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
       if $MYSQL "INSERT INTO writes_log (seq_num, note) VALUES (${seq_num}, 'trilio-demo-write-${seq_num}');" > /dev/null 2>&1; then
         printf "[%s]  Row #%-6d  seq=%-8d  OK\n" "${ts}" "${seq_num}" "${seq_num}"
@@ -58,3 +61,8 @@ data:
       fi
       sleep "${WRITE_INTERVAL}"
     done
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "✅ Writer complete — ${STOP_AFTER_ROWS} rows written. Job done."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

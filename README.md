@@ -13,7 +13,7 @@ A naive volume snapshot of a running database can capture dirty buffers, uncommi
 
 Trilio for Kubernetes's Hook mechanism runs quiesce/unquiesce commands **inside the database container** immediately before and after the volume snapshot, ensuring the database engine flushes its state to disk at exactly the right moment.
 
-This repo proves it: a **writer tool** continuously inserts numbered rows during the entire backup window, and a **consistency checker** verifies zero gaps in the sequence after restore.
+This repo proves it: a **writer Job** inserts numbered rows at 1 row/sec (10,000 rows total, ~2.7h) then exits automatically, and a **consistency checker** verifies zero gaps in the sequence after restore.
 
 ---
 
@@ -45,7 +45,7 @@ trilio-db-demos/
 ├── postgres/
 │   ├── README.md               ← PostgreSQL-specific guide & hook rationale
 │   ├── deploy/                 ← StatefulSet, Service, Secret
-│   ├── writer/                 ← Continuous write tool (Deployment + ConfigMap)
+│   ├── writer/                 ← Writer Job (10k rows, auto-terminates) + ConfigMap
 │   ├── checker/                ← Post-restore consistency verifier (Job)
 │   ├── trilio/                 ← Hook, BackupPlan, Backup CRs
 │   └── pitr/                   ← WAL archiving to S3 (WAL-G sidecar + docs)
@@ -71,7 +71,7 @@ kubectl apply -f postgres/deploy/ -n trilio-demo
 # 3. Wait for the database to be ready (~30s)
 kubectl rollout status statefulset/postgres -n trilio-demo
 
-# 4. Start the continuous writer
+# 4. Start the writer Job (writes 10,000 rows then exits automatically)
 kubectl apply -f postgres/writer/ -n trilio-demo
 
 # 5. Watch the writes in one terminal (keep this open!)
