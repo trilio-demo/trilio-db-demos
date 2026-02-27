@@ -156,6 +156,17 @@ After the snapshot is complete, `pg_switch_wal()` forces a switch to a new WAL s
 
 This is a non-disruptive operation — running transactions are not affected.
 
+### Recovering with WAL archiving (WAL-G + S3)
+
+If you are archiving WAL segments to S3 using WAL-G, a T4K restore alone is not enough to reach a point in time beyond the snapshot. Recovery works in two phases:
+
+1. **T4K restores the base** — the PVC is recreated from the snapshot. PostgreSQL enters crash recovery and replays the local WAL captured inside the snapshot, reaching the exact state at snapshot time.
+2. **WAL-G replays from S3** — if you configure `restore_command`, PostgreSQL keeps fetching WAL segments from S3 and replaying them until it reaches your `recovery_target_time`.
+
+The `pg_switch_wal()` post-hook is what makes the boundary between these two phases clean: it forces the WAL segment at snapshot time to be archived to S3 immediately, so there is no gap between what the snapshot contains and what S3 has.
+
+See [`pitr/README.md`](pitr/README.md) for the full setup and step-by-step recovery procedure.
+
 ### Why NOT `pg_start_backup()` / `pg_stop_backup()`?
 
 `pg_start_backup()` was designed for **pg_basebackup** — a file-level streaming replication backup that copies data files while the server is running. It forces a CHECKPOINT, creates a backup label file, and enters a special backup mode that keeps all generated WAL until `pg_stop_backup()` is called.
