@@ -151,8 +151,9 @@ mariadb/
 │   └── 02-service.yaml
 ├── writer/
 │   ├── writer-configmap.yaml
-│   └── writer-deployment.yaml
+│   └── writer-job.yaml
 ├── checker/
+│   ├── checker-configmap.yaml
 │   └── consistency-checker-job.yaml
 └── trilio/
     ├── hook.yaml               pre: FLUSH TABLES + FLUSH BINARY LOGS

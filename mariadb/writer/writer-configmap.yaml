@@ -13,7 +13,7 @@ data:
     STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-10000}"
 
     export MYSQL_PWD="${MARIADB_ROOT_PASSWORD}"
-    MYSQL="mysql -h ${DB_HOST} -P ${DB_PORT} -u root -D ${MARIADB_DATABASE} -Bse"
+    MYSQL="mariadb -h ${DB_HOST} -P ${DB_PORT} -u root -D ${MARIADB_DATABASE} -Bse"
 
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  Trilio for Kubernetes Database Backup Demo — MariaDB Writer"

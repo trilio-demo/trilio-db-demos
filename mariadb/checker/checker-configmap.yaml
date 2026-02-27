@@ -8,7 +8,7 @@ data:
     set -euo pipefail
 
     export MYSQL_PWD="${MARIADB_ROOT_PASSWORD}"
-    MYSQL="mysql -h mariadb-service -u root -D ${MARIADB_DATABASE} -Bse"
+    MYSQL="mariadb -h mariadb-service -u root -D ${MARIADB_DATABASE} -Bse"
     DIV="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     echo "$DIV"
