@@ -1,0 +1,8 @@
+apiVersion: triliovault.trilio.io/v1
+kind: Backup
+metadata:
+  name: mariadb-demo-backup
+spec:
+  backupPlan:
+    name: mariadb-backupplan
+  backupType: Full

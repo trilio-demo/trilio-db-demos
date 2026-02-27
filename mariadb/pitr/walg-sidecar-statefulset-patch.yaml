@@ -1,0 +1,75 @@
+# Strategic merge patch — adds binary log archiving to the mariadb StatefulSet.
+# Apply with:
+#   kubectl patch statefulset mariadb -n trilio-demo \
+#     --patch-file walg-sidecar-statefulset-patch.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mariadb
+spec:
+  template:
+    spec:
+      containers:
+        - name: wal-g-binlog
+          # WAL-G with MySQL support
+          image: ghcr.io/wal-g/wal-g:v3.0.3-mysql
+          command:
+            - bash
+            - -c
+            - |
+              echo "WAL-G binlog archiver starting..."
+              # WAL-G MySQL binlog streaming push — continuously archives new
+              # binary log files as MariaDB closes and rotates them.
+              wal-g binlog-push --config /etc/walg/config.yaml
+          env:
+            - name: WALG_S3_PREFIX
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config-mariadb
+                  key: WALG_S3_PREFIX
+            - name: AWS_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config-mariadb
+                  key: AWS_REGION
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config-mariadb
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config-mariadb
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: MYSQL_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-secret
+                  key: MARIADB_ROOT_PASSWORD
+            - name: WALG_MYSQL_HOST
+              value: "localhost"
+            - name: WALG_MYSQL_PORT
+              value: "3306"
+            - name: WALG_MYSQL_USER
+              value: "root"
+            - name: WALG_COMPRESSION_METHOD
+              value: brotli
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 300m
+              memory: 128Mi
+          volumeMounts:
+            - name: mariadb-data
+              mountPath: /var/lib/mysql
+            - name: pitr-config
+              mountPath: /etc/mysql/conf.d/pitr.cnf
+              subPath: pitr.cnf
+
+      volumes:
+        - name: pitr-config
+          configMap:
+            name: mariadb-pitr-config

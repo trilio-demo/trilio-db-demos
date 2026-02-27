@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-writer
+  labels:
+    app: postgres-writer
+    demo: trilio-db-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-writer
+  template:
+    metadata:
+      labels:
+        app: postgres-writer
+        demo: trilio-db-demo
+    spec:
+      containers:
+        - name: writer
+          image: postgres:17
+          command: ["/bin/bash", "/scripts/writer.sh"]
+          env:
+            - name: DB_HOST
+              value: "postgres-service"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_DB
+            - name: WRITE_INTERVAL
+              value: "1"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: postgres-writer-script
+            defaultMode: 0755

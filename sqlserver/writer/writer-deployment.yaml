@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqlserver-writer
+  labels:
+    app: sqlserver-writer
+    demo: trilio-db-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sqlserver-writer
+  template:
+    metadata:
+      labels:
+        app: sqlserver-writer
+        demo: trilio-db-demo
+    spec:
+      containers:
+        - name: writer
+          # Use the SQL Server image — it includes sqlcmd at /opt/mssql-tools18/bin/
+          image: mcr.microsoft.com/mssql/server:2022-latest
+          command: ["/bin/bash", "/scripts/writer.sh"]
+          env:
+            - name: DB_HOST
+              value: "sqlserver-service"
+            - name: SA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sqlserver-secret
+                  key: SA_PASSWORD
+            - name: MSSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: sqlserver-secret
+                  key: MSSQL_DATABASE
+            - name: WRITE_INTERVAL
+              value: "1"
+            - name: ACCEPT_EULA
+              value: "Y"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: sqlserver-writer-script
+            defaultMode: 0755

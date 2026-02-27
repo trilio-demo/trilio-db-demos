@@ -1,0 +1,56 @@
+apiVersion: triliovault.trilio.io/v1
+kind: Hook
+metadata:
+  name: mariadb-hook
+spec:
+  # ─── PRE-HOOK (runs immediately before the volume snapshot) ─────────────────
+  #
+  # FLUSH TABLES: Closes all open tables, flushes the InnoDB buffer pool
+  # (dirty pages) to the .ibd data files, and flushes the query cache.
+  # After this command, the on-disk data files reflect all committed transactions.
+  #
+  # FLUSH BINARY LOGS: Closes the current binary log file and opens a new one.
+  # This creates a clean boundary for Point-In-Time Recovery (PITR): you know
+  # exactly which binary log position the backup ends at.
+  #
+  # Why NOT FLUSH TABLES WITH READ LOCK (FTWRL)?
+  #   FTWRL is the most common advice, but it has a critical flaw when used with
+  #   Trilio for Kubernetes: FTWRL is SESSION-SCOPED. The global read lock is tied to the
+  #   MySQL connection. When the mysql client process exits at the end of the
+  #   pre-hook command, the lock is automatically released. Trilio for Kubernetes's hook
+  #   executor waits for the command to *complete* before taking the snapshot —
+  #   so by the time the snapshot happens, the FTWRL lock is already gone.
+  #
+  # Why InnoDB does not need a lock for consistent snapshots:
+  #   InnoDB uses a redo log (transaction log) for crash recovery. Even if a
+  #   volume snapshot captures the data files mid-transaction, InnoDB's crash
+  #   recovery will apply committed transactions and roll back uncommitted ones
+  #   upon startup. The snapshot, combined with InnoDB's crash recovery, always
+  #   produces a consistent database state. FLUSH TABLES ensures the buffer pool
+  #   is fully on disk, minimizing the recovery work needed.
+  #
+  pre:
+    execAction:
+      command:
+        - "bash"
+        - "-c"
+        - "MYSQL_PWD=$MARIADB_ROOT_PASSWORD mysql --user=root --connect-timeout=10 -Bse 'FLUSH TABLES; FLUSH BINARY LOGS;'"
+    ignoreFailure: false
+    maxRetryCount: 2
+    timeoutSeconds: 60
+
+  # ─── POST-HOOK (runs immediately after the volume snapshot completes) ────────
+  #
+  # A second FLUSH BINARY LOGS after the snapshot creates a log boundary that
+  # clearly marks the end of the backup window, making PITR setup straightforward.
+  # This is a non-disruptive operation.
+  #
+  post:
+    execAction:
+      command:
+        - "bash"
+        - "-c"
+        - "MYSQL_PWD=$MARIADB_ROOT_PASSWORD mysql --user=root --connect-timeout=10 -Bse 'FLUSH BINARY LOGS;'"
+    ignoreFailure: true   # Snapshot is already done; this is a PITR aid only
+    maxRetryCount: 1
+    timeoutSeconds: 30

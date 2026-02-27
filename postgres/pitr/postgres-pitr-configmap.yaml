@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-pitr-config
+data:
+  # These postgresql.conf parameters enable WAL archiving.
+  # They are appended to the default postgres configuration via POSTGRES_INITDB_ARGS
+  # or mounted as /etc/postgresql/postgresql.conf.d/pitr.conf
+  pitr.conf: |
+    # ── WAL Archiving (required for PITR) ─────────────────────────────────────
+    #
+    # wal_level must be 'replica' or higher to generate the WAL records
+    # needed for streaming replication and archiving.
+    wal_level = replica
+
+    # Enable WAL archiving. When on, PostgreSQL calls archive_command for each
+    # completed WAL segment before it can be recycled.
+    archive_mode = on
+
+    # archive_command is called with the segment filename (%f) and path (%p).
+    # WAL-G uploads the segment to S3 and exits 0 on success.
+    # If it exits non-zero, PostgreSQL retries — segments are never lost.
+    archive_command = 'wal-g wal-push %p'
+
+    # archive_timeout forces a WAL segment switch after N seconds even if the
+    # segment is not full. This bounds the maximum data loss window to N seconds.
+    # Set to 60 for 1-minute RPO, 300 for 5-minute RPO.
+    archive_timeout = 60
+
+    # ── Recovery (used after Trilio for Kubernetes restore) ──────────────────────────────
+    # These are only active when recovery.signal exists in PGDATA.
+    # Uncomment and set these AFTER a restore, before restarting PostgreSQL.
+    #
+    # restore_command = 'wal-g wal-fetch %f %p'
+    # recovery_target_time = '2026-02-27 14:35:00+00'
+    # recovery_target_action = 'promote'

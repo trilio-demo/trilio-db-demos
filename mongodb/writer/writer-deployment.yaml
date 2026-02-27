@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb-writer
+  labels:
+    app: mongodb-writer
+    demo: trilio-db-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb-writer
+  template:
+    metadata:
+      labels:
+        app: mongodb-writer
+        demo: trilio-db-demo
+    spec:
+      containers:
+        - name: writer
+          image: mongo:8.0
+          command: ["/bin/bash", "/scripts/writer.sh"]
+          env:
+            - name: DB_HOST
+              value: "mongodb-service"
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secret
+                  key: MONGO_INITDB_ROOT_USERNAME
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secret
+                  key: MONGO_INITDB_ROOT_PASSWORD
+            - name: MONGO_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secret
+                  key: MONGO_DATABASE
+            - name: WRITE_INTERVAL
+              value: "1"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: mongodb-writer-script
+            defaultMode: 0755

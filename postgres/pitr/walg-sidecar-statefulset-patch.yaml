@@ -1,0 +1,104 @@
+# Strategic merge patch — adds WAL-G sidecar to the postgres StatefulSet.
+# Apply with:
+#   kubectl patch statefulset postgres -n trilio-demo \
+#     --patch-file walg-sidecar-statefulset-patch.yaml
+#
+# Prerequisites:
+#   kubectl create secret generic walg-config \
+#     --from-literal=WALG_S3_PREFIX=s3://<bucket>/postgres/wal \
+#     --from-literal=AWS_REGION=<region> \
+#     --from-literal=AWS_ACCESS_KEY_ID=<key> \
+#     --from-literal=AWS_SECRET_ACCESS_KEY=<secret> \
+#     -n trilio-demo
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  template:
+    spec:
+      # Share the data volume between postgres and wal-g sidecar
+      initContainers:
+        # One-time init: configure archive_mode and archive_command
+        - name: postgres-pitr-init
+          image: postgres:17
+          command:
+            - bash
+            - -c
+            - |
+              CONF_DIR="${PGDATA}/conf.d"
+              mkdir -p "${CONF_DIR}"
+              cat > "${CONF_DIR}/pitr.conf" << 'EOF'
+              wal_level = replica
+              archive_mode = on
+              archive_command = '/usr/local/bin/wal-g wal-push %p'
+              archive_timeout = 60
+              EOF
+              # Include conf.d in postgresql.conf if not already present
+              grep -q "conf.d" "${PGDATA}/postgresql.conf" 2>/dev/null || \
+                echo "include_dir = 'conf.d'" >> "${PGDATA}/postgresql.conf"
+              echo "PITR configuration written."
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+
+      containers:
+        # ── WAL-G sidecar ─────────────────────────────────────────────────────
+        # Watches for WAL segments archived by PostgreSQL and ships them to S3.
+        # PostgreSQL calls `archive_command` (wal-g wal-push) synchronously;
+        # this sidecar provides the wal-g binary on a shared volume.
+        - name: wal-g
+          image: ghcr.io/wal-g/wal-g:v3.0.3-pg17
+          command:
+            - bash
+            - -c
+            - |
+              # Copy wal-g binary to shared location accessible by postgres container
+              cp /usr/local/bin/wal-g /shared/wal-g
+              chmod +x /shared/wal-g
+              echo "WAL-G binary ready. Monitoring for archive activity..."
+              # Keep sidecar alive; actual work is done by wal-g called from postgres
+              tail -f /dev/null
+          env:
+            - name: WALG_S3_PREFIX
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config
+                  key: WALG_S3_PREFIX
+            - name: AWS_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config
+                  key: AWS_REGION
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config
+                  key: AWS_SECRET_ACCESS_KEY
+            # Compress WAL segments before upload (recommended)
+            - name: WALG_COMPRESSION_METHOD
+              value: brotli
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+            - name: wal-g-bin
+              mountPath: /shared
+
+      volumes:
+        - name: wal-g-bin
+          emptyDir: {}

@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sqlserver-writer-script
+data:
+  writer.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    DB_HOST="${DB_HOST:-sqlserver-service}"
+    DB_PORT="${DB_PORT:-1433}"
+    DB_NAME="${MSSQL_DATABASE:-demodb}"
+    WRITE_INTERVAL="${WRITE_INTERVAL:-1}"
+
+    SQLCMD="/opt/mssql-tools18/bin/sqlcmd -S ${DB_HOST},${DB_PORT} -U sa -P ${SA_PASSWORD} -No"
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Trilio for Kubernetes Database Backup Demo — SQL Server 2022 Writer"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Host     : ${DB_HOST}:${DB_PORT}"
+    echo "  Database : ${DB_NAME}"
+    echo "  Interval : ${WRITE_INTERVAL}s per row"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    echo "⏳ Waiting for SQL Server at ${DB_HOST}:${DB_PORT}..."
+    until $SQLCMD -Q "SELECT 1" > /dev/null 2>&1; do
+      echo "   Not ready yet, retrying in 5s..."
+      sleep 5
+    done
+    echo "✅ Connected to SQL Server!"
+    echo ""
+
+    # Create database and table if they don't exist
+    $SQLCMD -Q "
+      IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = '${DB_NAME}')
+      BEGIN
+        CREATE DATABASE [${DB_NAME}];
+        ALTER DATABASE [${DB_NAME}] SET RECOVERY FULL;
+      END
+    " > /dev/null
+
+    $SQLCMD -d "${DB_NAME}" -Q "
+      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'writes_log')
+      CREATE TABLE writes_log (
+        id         INT IDENTITY(1,1) PRIMARY KEY,
+        seq_num    BIGINT NOT NULL,
+        written_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+        note       NVARCHAR(255)
+      );
+    " > /dev/null
+    echo "📋 Table 'writes_log' ready."
+
+    LAST_SEQ=$($SQLCMD -d "${DB_NAME}" -h -1 -Q "SET NOCOUNT ON; SELECT ISNULL(MAX(seq_num),0) FROM writes_log" 2>/dev/null | tr -d ' \r\n' || echo "0")
+    seq_num=$((LAST_SEQ + 1))
+
+    echo "📝 Starting write loop from seq #${seq_num} (${WRITE_INTERVAL}s/row). Ctrl+C to stop."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    while true; do
+      ts=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+      if $SQLCMD -d "${DB_NAME}" -Q "
+        INSERT INTO writes_log (seq_num, note)
+        VALUES (${seq_num}, 'trilio-demo-write-${seq_num}');
+      " > /dev/null 2>&1; then
+        printf "[%s]  Row #%-6d  seq=%-8d  OK\n" "${ts}" "${seq_num}" "${seq_num}"
+        seq_num=$((seq_num + 1))
+      else
+        echo "[${ts}]  ERROR writing row #${seq_num} — retrying in 3s..."
+        sleep 3
+        continue
+      fi
+      sleep "${WRITE_INTERVAL}"
+    done

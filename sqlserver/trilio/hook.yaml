@@ -1,0 +1,55 @@
+apiVersion: triliovault.trilio.io/v1
+kind: Hook
+metadata:
+  name: sqlserver-hook
+spec:
+  # ─── PRE-HOOK (runs immediately before the volume snapshot) ─────────────────
+  #
+  # CHECKPOINT forces SQL Server to write all dirty pages from the buffer pool
+  # to the data files (.mdf/.ndf) on disk for ALL databases on the instance.
+  #
+  # SQL Server's transaction log (LDF files) provides crash recovery — even if
+  # the snapshot captures some in-flight transactions, SQL Server will apply
+  # committed transactions and roll back uncommitted ones upon startup.
+  # CHECKPOINT minimizes the recovery work by ensuring the data files are as
+  # current as possible before the snapshot is taken.
+  #
+  # Why SQL Server is inherently snapshot-friendly:
+  #   SQL Server was designed with VSS (Volume Shadow Copy Service) in mind.
+  #   It uses a "torn page detection" and "page checksum" mechanism that ensures
+  #   even an abrupt snapshot produces a recoverable state. Unlike some database
+  #   engines, SQL Server does not require a lock to be held during the snapshot
+  #   for crash-consistent recovery.
+  #
+  # Recovery model note:
+  #   The writer creates the database with RECOVERY FULL. In Full Recovery model,
+  #   SQL Server keeps all transaction log records until a log backup is taken.
+  #   This enables Point-In-Time Recovery. After restoring a volume snapshot,
+  #   you can apply transaction log backups to recover to any point in time.
+  #
+  pre:
+    execAction:
+      command:
+        - "bash"
+        - "-c"
+        - "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -No -Q 'CHECKPOINT'"
+    ignoreFailure: false
+    maxRetryCount: 2
+    timeoutSeconds: 60
+
+  # ─── POST-HOOK (runs immediately after the volume snapshot completes) ────────
+  #
+  # A second CHECKPOINT after the snapshot ensures a clean recovery boundary.
+  # This is optional — the backup is already safe — but it closes any
+  # transactions that started during the snapshot window, minimizing transaction
+  # log replay in a future recovery scenario.
+  #
+  post:
+    execAction:
+      command:
+        - "bash"
+        - "-c"
+        - "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -No -Q 'CHECKPOINT'"
+    ignoreFailure: true
+    maxRetryCount: 1
+    timeoutSeconds: 30

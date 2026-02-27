@@ -1,0 +1,11 @@
+apiVersion: triliovault.trilio.io/v1
+kind: Backup
+metadata:
+  name: postgres-demo-backup
+spec:
+  backupPlan:
+    name: postgres-backupplan
+  backupType: Full
+  # Apply this manifest while the writer is running to start a backup.
+  # Watch progress with:
+  #   kubectl get backup postgres-demo-backup -n <namespace> -w

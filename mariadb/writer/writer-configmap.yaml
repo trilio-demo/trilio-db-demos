@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mariadb-writer-script
+data:
+  writer.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    DB_HOST="${DB_HOST:-mariadb-service}"
+    DB_PORT="${DB_PORT:-3306}"
+    WRITE_INTERVAL="${WRITE_INTERVAL:-1}"
+
+    export MYSQL_PWD="${MARIADB_ROOT_PASSWORD}"
+    MYSQL="mysql -h ${DB_HOST} -P ${DB_PORT} -u root -D ${MARIADB_DATABASE} -Bse"
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Trilio for Kubernetes Database Backup Demo — MariaDB Writer"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Host     : ${DB_HOST}:${DB_PORT}"
+    echo "  Database : ${MARIADB_DATABASE}"
+    echo "  Interval : ${WRITE_INTERVAL}s per row"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    echo "⏳ Waiting for MariaDB at ${DB_HOST}:${DB_PORT}..."
+    until $MYSQL "SELECT 1" > /dev/null 2>&1; do
+      echo "   Not ready yet, retrying in 3s..."
+      sleep 3
+    done
+    echo "✅ Connected to MariaDB!"
+    echo ""
+
+    $MYSQL "
+      CREATE TABLE IF NOT EXISTS writes_log (
+        id         INT AUTO_INCREMENT PRIMARY KEY,
+        seq_num    BIGINT NOT NULL,
+        written_at TIMESTAMP(3) NOT NULL DEFAULT NOW(3),
+        note       VARCHAR(255)
+      );
+    " > /dev/null
+    echo "📋 Table 'writes_log' ready."
+
+    LAST_SEQ=$($MYSQL "SELECT COALESCE(MAX(seq_num), 0) FROM writes_log;" 2>/dev/null || echo "0")
+    seq_num=$((LAST_SEQ + 1))
+
+    echo "📝 Starting write loop from seq #${seq_num} (${WRITE_INTERVAL}s/row). Ctrl+C to stop."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    while true; do
+      ts=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+      if $MYSQL "INSERT INTO writes_log (seq_num, note) VALUES (${seq_num}, 'trilio-demo-write-${seq_num}');" > /dev/null 2>&1; then
+        printf "[%s]  Row #%-6d  seq=%-8d  OK\n" "${ts}" "${seq_num}" "${seq_num}"
+        seq_num=$((seq_num + 1))
+      else
+        echo "[${ts}]  ERROR writing row #${seq_num} — retrying in 3s..."
+        sleep 3
+        continue
+      fi
+      sleep "${WRITE_INTERVAL}"
+    done

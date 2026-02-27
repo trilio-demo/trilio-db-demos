@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mariadb-pitr-config
+data:
+  pitr.cnf: |
+    [mysqld]
+    # ── Binary Logging (required for PITR) ────────────────────────────────────
+
+    # Enable binary logging. Without this, no PITR is possible.
+    log_bin = /var/lib/mysql/binlog
+
+    # Rotate binary logs at 64MB so segments are archived to S3 frequently.
+    # Smaller segments = more frequent S3 uploads = lower data loss window.
+    max_binlog_size = 67108864
+
+    # Flush binary log to disk on every transaction commit.
+    # Critical for PITR durability. Has a minor performance cost.
+    sync_binlog = 1
+
+    # InnoDB redo log flush on every commit (ACID compliance).
+    innodb_flush_log_at_trx_commit = 1
+
+    # Retain local binary logs for 2 days (gives the sidecar time to archive).
+    # WAL-G manages S3 retention independently.
+    expire_logs_days = 2
+
+    # Use GTID for position-independent, reliable PITR.
+    gtid_strict_mode = ON
+
+    # Binary log format: ROW is required for complete PITR with all statement types.
+    binlog_format = ROW

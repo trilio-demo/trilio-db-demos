@@ -1,0 +1,8 @@
+apiVersion: triliovault.trilio.io/v1
+kind: Backup
+metadata:
+  name: sqlserver-demo-backup
+spec:
+  backupPlan:
+    name: sqlserver-backupplan
+  backupType: Full

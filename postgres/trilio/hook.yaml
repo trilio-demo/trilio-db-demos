@@ -1,0 +1,51 @@
+apiVersion: triliovault.trilio.io/v1
+kind: Hook
+metadata:
+  name: postgres-hook
+spec:
+  # ─── PRE-HOOK (runs immediately before the volume snapshot) ─────────────────
+  #
+  # CHECKPOINT forces PostgreSQL to write all dirty pages from the shared buffer
+  # pool to the data files on disk, and flushes the WAL (Write-Ahead Log) up to
+  # that point. After a CHECKPOINT, the on-disk data files represent a clean,
+  # consistent database state.
+  #
+  # Why this is enough for a volume snapshot:
+  #   PostgreSQL uses WAL-based crash recovery. Even without a lock, any volume
+  #   snapshot taken after CHECKPOINT can be replayed through crash recovery to
+  #   reach a consistent state. No transactions are left "half-written" on disk.
+  #
+  # Why we do NOT use pg_start_backup():
+  #   pg_start_backup() is designed for file-level streaming replication backup
+  #   (pg_basebackup). Trilio for Kubernetes takes a volume-level snapshot, which is a
+  #   different mechanism. Using pg_start_backup() would be redundant and
+  #   would require pg_stop_backup() to complete before the WAL segment is usable.
+  #
+  pre:
+    execAction:
+      command:
+        - "bash"
+        - "-c"
+        - "PGPASSWORD=$POSTGRES_PASSWORD psql -h localhost -U $POSTGRES_USER -d $POSTGRES_DB -c 'CHECKPOINT;'"
+    ignoreFailure: false
+    maxRetryCount: 2
+    timeoutSeconds: 60
+
+  # ─── POST-HOOK (runs immediately after the volume snapshot completes) ────────
+  #
+  # pg_switch_wal() forces PostgreSQL to switch to a new WAL segment file.
+  # This creates a clean boundary in the WAL stream at the point of backup,
+  # which is valuable for Point-In-Time Recovery (PITR): you know exactly which
+  # WAL segment the backup ends at.
+  #
+  # This is a non-disruptive operation — it does not affect running transactions.
+  #
+  post:
+    execAction:
+      command:
+        - "bash"
+        - "-c"
+        - "PGPASSWORD=$POSTGRES_PASSWORD psql -h localhost -U $POSTGRES_USER -d $POSTGRES_DB -c 'SELECT pg_switch_wal();'"
+    ignoreFailure: true   # Non-critical: backup is already complete at this point
+    maxRetryCount: 1
+    timeoutSeconds: 30

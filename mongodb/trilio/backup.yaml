@@ -1,0 +1,8 @@
+apiVersion: triliovault.trilio.io/v1
+kind: Backup
+metadata:
+  name: mongodb-demo-backup
+spec:
+  backupPlan:
+    name: mongodb-backupplan
+  backupType: Full

@@ -1,0 +1,66 @@
+apiVersion: triliovault.trilio.io/v1
+kind: Hook
+metadata:
+  name: mongodb-hook
+spec:
+  # ─── PRE-HOOK (runs immediately before the volume snapshot) ─────────────────
+  #
+  # db.adminCommand({fsync:1, lock:true}) does two things:
+  #
+  # 1. fsync=1: Flushes all pending writes from the WiredTiger cache to the
+  #    data files on disk. After this, the on-disk data files are up-to-date.
+  #
+  # 2. lock=true: Acquires a GLOBAL write lock that blocks all new write
+  #    operations. Unlike MariaDB's FLUSH TABLES WITH READ LOCK, MongoDB's
+  #    fsyncLock is NOT session-scoped — it persists independently of the
+  #    connection that issued it. The lock remains active after the mongosh
+  #    client exits and is only released by an explicit fsyncUnlock command.
+  #
+  # Why this works correctly with Trilio for Kubernetes:
+  #   Trilio for Kubernetes's pre-hook runs to completion, then takes the snapshot.
+  #   Because the fsyncLock survives connection close, the write lock is STILL
+  #   HELD when the volume snapshot is taken. The database is truly frozen during
+  #   the snapshot window. This is the strongest consistency guarantee of all
+  #   four databases in this demo.
+  #
+  # Impact on the running application:
+  #   Write operations will be blocked (queued) during the snapshot window.
+  #   Read operations are not affected. The demo writer will experience a brief
+  #   pause in successful writes, which is visible in the logs — demonstrating
+  #   that Trilio for Kubernetes is actively protecting data integrity during the snapshot.
+  #
+  pre:
+    execAction:
+      command:
+        - "bash"
+        - "-c"
+        - |
+          mongosh --quiet \
+            "mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@localhost:27017/admin" \
+            --eval "db.adminCommand({fsync:1, lock:true})"
+    ignoreFailure: false
+    maxRetryCount: 2
+    timeoutSeconds: 60
+
+  # ─── POST-HOOK (runs immediately after the volume snapshot completes) ────────
+  #
+  # db.adminCommand({fsyncUnlock:1}) releases the global write lock acquired by
+  # the pre-hook. Writes resume immediately. This command is idempotent — calling
+  # it when not locked is safe.
+  #
+  # After unlock, MongoDB resumes normal operation. The writer will pick up where
+  # it left off, and the sequence of documents will have no gaps (queued writes
+  # were not lost, they were held by the driver and re-attempted after unlock).
+  #
+  post:
+    execAction:
+      command:
+        - "bash"
+        - "-c"
+        - |
+          mongosh --quiet \
+            "mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@localhost:27017/admin" \
+            --eval "db.adminCommand({fsyncUnlock:1})"
+    ignoreFailure: false   # Critical: must unlock or writes will be blocked forever
+    maxRetryCount: 3
+    timeoutSeconds: 60

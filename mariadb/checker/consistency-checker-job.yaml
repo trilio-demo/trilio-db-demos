@@ -1,0 +1,66 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mariadb-consistency-checker
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: checker
+          image: mariadb:11.4
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              export MYSQL_PWD="${MARIADB_ROOT_PASSWORD}"
+              MYSQL="mysql -h mariadb-service -u root -D ${MARIADB_DATABASE} -Bse"
+
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "  Trilio for Kubernetes Consistency Checker — MariaDB"
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+              echo "⏳ Waiting for MariaDB..."
+              until $MYSQL "SELECT 1" > /dev/null 2>&1; do sleep 2; done
+              echo "✅ Connected."
+              echo ""
+
+              TOTAL=$($MYSQL "SELECT COUNT(*) FROM writes_log;")
+              MIN_SEQ=$($MYSQL "SELECT MIN(seq_num) FROM writes_log;")
+              MAX_SEQ=$($MYSQL "SELECT MAX(seq_num) FROM writes_log;")
+              EXPECTED=$((MAX_SEQ - MIN_SEQ + 1))
+              GAPS=$($MYSQL "
+                SELECT COUNT(*) FROM writes_log w1
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM writes_log w2 WHERE w2.seq_num = w1.seq_num + 1
+                ) AND w1.seq_num < (SELECT MAX(seq_num) FROM writes_log);
+              ")
+
+              echo "📊 Results:"
+              echo "   Total rows written   : ${TOTAL}"
+              echo "   Sequence range       : ${MIN_SEQ} → ${MAX_SEQ}"
+              echo "   Expected (no gaps)   : ${EXPECTED}"
+              echo "   Gaps detected        : ${GAPS}"
+              echo ""
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+              if [ "${GAPS}" -eq "0" ] && [ "${TOTAL}" -eq "${EXPECTED}" ]; then
+                echo "  ✅  CONSISTENCY CHECK PASSED"
+                echo "  No gaps in write sequence. Backup was crash-consistent."
+              else
+                echo "  ❌  CONSISTENCY CHECK FAILED"
+                echo "  Gaps: ${GAPS}. Expected ${EXPECTED} rows, found ${TOTAL}."
+                exit 1
+              fi
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          env:
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-secret
+                  key: MARIADB_ROOT_PASSWORD
+            - name: MARIADB_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-secret
+                  key: MARIADB_DATABASE

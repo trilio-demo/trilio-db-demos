@@ -1,0 +1,59 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sqlserver-log-backup
+spec:
+  # Run every 5 minutes — adjust for your RPO target
+  # Every 1 minute:  */1 * * * *   → ~1 minute RPO
+  # Every 5 minutes: */5 * * * *   → ~5 minute RPO
+  # Every 15 minutes: */15 * * * * → ~15 minute RPO
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid    # Never run two log backups simultaneously
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: log-backup
+              image: mcr.microsoft.com/mssql/server:2022-latest
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  SQLCMD="/opt/mssql-tools18/bin/sqlcmd -S sqlserver-service,1433 -U sa -P ${SA_PASSWORD} -No"
+                  TIMESTAMP=$(date -u +"%Y%m%d_%H%M%S")
+                  S3_URL="s3://${S3_BUCKET}/sqlserver/logs/log_${TIMESTAMP}.bak"
+
+                  echo "📦 Starting transaction log backup → ${S3_URL}"
+
+                  $SQLCMD -d "${MSSQL_DATABASE}" -Q "
+                    BACKUP LOG [${MSSQL_DATABASE}]
+                    TO URL = '${S3_URL}'
+                    WITH
+                      COMPRESSION,
+                      STATS = 10,
+                      FORMAT;
+                  " && echo "✅ Log backup complete: ${S3_URL}" || {
+                    echo "❌ Log backup FAILED. Check SQL Server error log."
+                    exit 1
+                  }
+              env:
+                - name: SA_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: sqlserver-s3-backup
+                      key: SA_PASSWORD
+                - name: MSSQL_DATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: sqlserver-secret
+                      key: MSSQL_DATABASE
+                - name: S3_BUCKET
+                  valueFrom:
+                    secretKeyRef:
+                      name: sqlserver-s3-backup
+                      key: S3_BUCKET
+                - name: ACCEPT_EULA
+                  value: "Y"

@@ -1,0 +1,81 @@
+# Strategic merge patch — adds replica set mode and WAL-G oplog archiving.
+# Apply with:
+#   kubectl patch statefulset mongodb -n trilio-demo \
+#     --patch-file walg-sidecar-statefulset-patch.yaml
+#
+# After applying, initialize the replica set:
+#   kubectl exec -it mongodb-0 -n trilio-demo -- mongosh -u root -p RootDemo1234! \
+#     --authenticationDatabase admin \
+#     --eval "rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})"
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+spec:
+  template:
+    spec:
+      containers:
+        - name: mongodb
+          # Enable replica set mode — required for oplog (and thus PITR)
+          args:
+            - "--replSet"
+            - "rs0"
+            - "--oplogSize"
+            - "512"   # 512 MB oplog — increase for busy databases
+
+        - name: wal-g-oplog
+          image: ghcr.io/wal-g/wal-g:v3.0.3-mongo
+          command:
+            - bash
+            - -c
+            - |
+              echo "WAL-G oplog archiver starting — waiting for MongoDB replica set..."
+              sleep 30  # Wait for mongod + rs.initiate()
+              echo "Starting oplog archiving to S3..."
+              # wal-g oplog-push streams oplog entries continuously to S3
+              wal-g oplog-push
+          env:
+            - name: WALG_S3_PREFIX
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config-mongodb
+                  key: WALG_S3_PREFIX
+            - name: AWS_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config-mongodb
+                  key: AWS_REGION
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config-mongodb
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config-mongodb
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: MONGODB_URI
+              value: "mongodb://$(MONGO_INITDB_ROOT_USERNAME):$(MONGO_INITDB_ROOT_PASSWORD)@localhost:27017/admin"
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secret
+                  key: MONGO_INITDB_ROOT_USERNAME
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secret
+                  key: MONGO_INITDB_ROOT_PASSWORD
+            - name: WALG_COMPRESSION_METHOD
+              value: brotli
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          volumeMounts:
+            - name: mongodb-data
+              mountPath: /data/db

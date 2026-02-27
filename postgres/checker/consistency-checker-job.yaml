@@ -1,0 +1,75 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-consistency-checker
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: checker
+          image: postgres:17
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              export PGPASSWORD="${POSTGRES_PASSWORD}"
+              PSQL="psql -h postgres-service -U ${POSTGRES_USER} -d ${POSTGRES_DB} -t -A"
+
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "  Trilio for Kubernetes Consistency Checker — PostgreSQL"
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+              echo "⏳ Waiting for PostgreSQL..."
+              until $PSQL -c "SELECT 1" > /dev/null 2>&1; do sleep 2; done
+              echo "✅ Connected."
+              echo ""
+
+              TOTAL=$($PSQL -c "SELECT COUNT(*) FROM writes_log;")
+              MIN_SEQ=$($PSQL -c "SELECT MIN(seq_num) FROM writes_log;")
+              MAX_SEQ=$($PSQL -c "SELECT MAX(seq_num) FROM writes_log;")
+              EXPECTED=$((MAX_SEQ - MIN_SEQ + 1))
+
+              # Count gaps: find seq values where (seq+1) is missing
+              GAPS=$($PSQL -c "
+                SELECT COUNT(*) FROM writes_log w1
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM writes_log w2
+                  WHERE w2.seq_num = w1.seq_num + 1
+                ) AND w1.seq_num < (SELECT MAX(seq_num) FROM writes_log);
+              ")
+
+              echo "📊 Results:"
+              echo "   Total rows written   : ${TOTAL}"
+              echo "   Sequence range       : ${MIN_SEQ} → ${MAX_SEQ}"
+              echo "   Expected (no gaps)   : ${EXPECTED}"
+              echo "   Gaps detected        : ${GAPS}"
+              echo ""
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+              if [ "${GAPS}" -eq "0" ] && [ "${TOTAL}" -eq "${EXPECTED}" ]; then
+                echo "  ✅  CONSISTENCY CHECK PASSED"
+                echo "  No gaps in write sequence. Backup was crash-consistent."
+              else
+                echo "  ❌  CONSISTENCY CHECK FAILED"
+                echo "  Gaps found: ${GAPS}. Expected ${EXPECTED} rows, found ${TOTAL}."
+                echo "  This may indicate the backup was NOT consistent."
+                exit 1
+              fi
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_DB

@@ -1,0 +1,61 @@
+---
+# One-time Job: registers S3 credentials inside SQL Server so that
+# BACKUP ... TO URL = 's3://...' can authenticate with your S3 bucket.
+# Run once after deploying SQL Server, before the log backup CronJob starts.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sqlserver-s3-credential-init
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: mcr.microsoft.com/mssql/server:2022-latest
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              SQLCMD="/opt/mssql-tools18/bin/sqlcmd -S sqlserver-service,1433 -U sa -P ${SA_PASSWORD} -No"
+
+              echo "⏳ Waiting for SQL Server..."
+              until $SQLCMD -Q "SELECT 1" > /dev/null 2>&1; do sleep 5; done
+              echo "✅ Connected."
+
+              # Create the S3 credential inside SQL Server.
+              # The credential name must match the S3 endpoint host.
+              $SQLCMD -Q "
+                IF NOT EXISTS (
+                  SELECT * FROM sys.credentials
+                  WHERE name = 's3.amazonaws.com'
+                )
+                CREATE CREDENTIAL [s3.amazonaws.com]
+                  WITH IDENTITY    = 'S3 Access Key',
+                       SECRET      = '${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}';
+                ELSE
+                  ALTER CREDENTIAL [s3.amazonaws.com]
+                    WITH IDENTITY  = 'S3 Access Key',
+                         SECRET    = '${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}';
+              " && echo "✅ SQL Server S3 credential created/updated."
+
+              # Verify the credential exists
+              $SQLCMD -Q "SELECT name, credential_identity FROM sys.credentials;"
+          env:
+            - name: SA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sqlserver-s3-backup
+                  key: SA_PASSWORD
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: sqlserver-s3-backup
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sqlserver-s3-backup
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: ACCEPT_EULA
+              value: "Y"
