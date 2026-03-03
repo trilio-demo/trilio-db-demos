@@ -7,7 +7,7 @@ data:
     #!/bin/bash
     set -euo pipefail
 
-    MONGO_URI="mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongodb-service:27017/admin"
+    MONGO_URI="mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongodb-service:27017/${MONGO_DATABASE}?authSource=admin"
     MONGOSH="mongosh --quiet ${MONGO_URI}"
     DIV="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -23,7 +23,7 @@ data:
 
     # Run the full report as a single mongosh script to avoid multiple connections
     $MONGOSH --eval "
-      use ${MONGO_DATABASE};
+      // database is set via URI (?authSource=admin, db=${MONGO_DATABASE})
       const DIV = '━'.repeat(66);
 
       // ── Summary ──────────────────────────────────────────────────────────

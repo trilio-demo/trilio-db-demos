@@ -12,7 +12,7 @@ data:
     WRITE_INTERVAL="${WRITE_INTERVAL:-1}"
     STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-10000}"
 
-    MONGO_URI="mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@${DB_HOST}:${DB_PORT}/admin"
+    MONGO_URI="mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@${DB_HOST}:${DB_PORT}/${MONGO_DATABASE}?authSource=admin"
     MONGOSH="mongosh --quiet ${MONGO_URI}"
 
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -33,7 +33,6 @@ data:
     echo ""
 
     LAST_SEQ=$($MONGOSH --eval "
-      use ${MONGO_DATABASE};
       const doc = db.writes_log.find().sort({seq_num:-1}).limit(1).toArray();
       doc.length > 0 ? doc[0].seq_num : 0;
     " 2>/dev/null | tail -1 || echo "0")
@@ -45,7 +44,6 @@ data:
     while [ "$seq_num" -le "$((LAST_SEQ + STOP_AFTER_ROWS))" ]; do
       ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
       if $MONGOSH --eval "
-        use ${MONGO_DATABASE};
         db.writes_log.insertOne({
           seq_num: ${seq_num},
           written_at: new Date(),
