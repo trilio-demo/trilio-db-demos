@@ -38,10 +38,15 @@ kubectl get backups.triliovault.trilio.io mongodb-demo-backup -n trilio-demo -w
 kubectl apply -f checker/ -n trilio-demo
 kubectl logs -f job/mongodb-consistency-checker -n trilio-demo
 
-# STEP 7 — Simulate disaster
-kubectl delete namespace trilio-demo
+# STEP 7 — Simulate disaster (delete StatefulSet + PVC — data is physically gone)
+kubectl delete statefulset mongodb -n trilio-demo
+kubectl delete pvc mongodb-data-mongodb-0 -n trilio-demo
 
-# STEP 8 — Restore via T4K (UI or CLI), then run consistency checker
+# STEP 8 — In-place restore (namespace is preserved — no need to reconfigure target)
+kubectl apply -f trilio/restore.yaml -n trilio-demo
+kubectl get restores.triliovault.trilio.io -n trilio-demo -w
+
+# STEP 9 — Run consistency checker after restore and compare with baseline
 kubectl delete job mongodb-consistency-checker -n trilio-demo --ignore-not-found
 kubectl apply -f checker/ -n trilio-demo
 kubectl logs -f job/mongodb-consistency-checker -n trilio-demo

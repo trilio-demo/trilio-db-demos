@@ -76,7 +76,7 @@ data:
     echo "   p50               : ${P50}ms"
     echo "   p95               : ${P95}ms"
     echo "   p99               : ${P99}ms"
-    echo "   max               : ${MAX}ms"
+    echo "   max               : ${MAX}ms  (large value after restore = gap between backup and writer resuming — expected)"
     echo ""
 
     # ── ④ Stall Detection ─────────────────────────────────────────────────────
@@ -89,7 +89,7 @@ data:
       )
       SELECT seq_num, to_char(written_at, 'HH24:MI:SS.MS'), ROUND(ms::numeric, 0)
       FROM intervals
-      WHERE ms > 2000
+      WHERE ms > 2000 AND ms < 60000
       ORDER BY ms DESC
       LIMIT 10;
     ")
@@ -129,7 +129,7 @@ data:
     while IFS='|' read -r bucket cnt; do
       bucket=$(echo "$bucket" | tr -d ' ')
       cnt=$(echo "$cnt" | tr -d ' ')
-      bar=$(python3 -c "print('█' * int('$cnt'))")
+      bar=$(printf '%.0s█' $(seq 1 $cnt))
       printf "   %s  %-12s  %s rows\n" "$bucket" "$bar" "$cnt"
     done <<< "$TIMELINE"
 

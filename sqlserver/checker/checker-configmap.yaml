@@ -76,7 +76,7 @@ data:
     echo "   p50               : ${P50}ms"
     echo "   p95               : ${P95}ms"
     echo "   p99               : ${P99}ms"
-    echo "   max               : ${MAX}ms"
+    echo "   max               : ${MAX}ms  (large value after restore = gap between backup and writer resuming — expected)"
     echo ""
 
     echo "─── ③ Write Stalls (interval > 2× expected = >2000ms) ───────────────"
@@ -92,7 +92,7 @@ data:
         CONVERT(VARCHAR, written_at, 114) AS ts,
         ms
       FROM intervals
-      WHERE ms > 2000
+      WHERE ms > 2000 AND ms < 60000
       ORDER BY ms DESC;
     " 2>/dev/null | tr -d '\r' | grep -v '^$' | grep -v '\-\-\-')
 
@@ -127,7 +127,7 @@ data:
     " 2>/dev/null | tr -d '\r' | grep -v '^$' | grep -v '\-\-\-')
 
     echo "$TIMELINE" | while read -r bucket cnt; do
-      bar=$(python3 -c "print('█' * int('$cnt'))" 2>/dev/null || printf '%0.s#' $(seq 1 $cnt))
+      bar=$(printf '%.0s█' $(seq 1 $cnt))
       printf "   %s  %-12s  %s rows\n" "$bucket" "$bar" "$cnt"
     done
 

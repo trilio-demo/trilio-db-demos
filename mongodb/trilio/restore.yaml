@@ -1,0 +1,16 @@
+apiVersion: triliovault.trilio.io/v1
+kind: Restore
+metadata:
+  name: mongodb-inplace-restore
+  namespace: trilio-demo
+spec:
+  source:
+    type: Backup
+    backup:
+      name: mongodb-demo-backup
+      namespace: trilio-demo
+  cleanupConfig:
+    enabled: true                       # ← in-place restore: T4K cleans up the
+    gracefulDeletionTimeoutSeconds: 120  #   namespace and restores from backup.
+                                         #   Namespace is preserved — no need to
+                                         #   reconfigure targets or credentials.
