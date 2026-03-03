@@ -10,7 +10,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: checker
-          image: mongo:8.0
+          image: docker.io/library/mongo:8.0
           command: ["/bin/bash", "/scripts/checker.sh"]
           env:
             - name: MONGO_INITDB_ROOT_USERNAME
