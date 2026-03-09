@@ -71,8 +71,10 @@ data:
     P95=$(echo "$LATENCY" | cut -d'|' -f2 | tr -d ' ')
     P99=$(echo "$LATENCY" | cut -d'|' -f3 | tr -d ' ')
     MAX=$(echo "$LATENCY" | cut -d'|' -f4 | tr -d ' ')
+    STALL_MS=$((P50 * 2))           # adaptive: 2× p50
+    STALL_CAP=$((STALL_MS * 30))    # cap excludes restore gap (30× stall threshold)
 
-    echo "   Expected interval : ~1000ms  (1 row/sec)"
+    echo "   Expected interval : ~${P50}ms  (p50 — reference for stall detection)"
     echo "   p50               : ${P50}ms"
     echo "   p95               : ${P95}ms"
     echo "   p99               : ${P99}ms"
@@ -80,7 +82,7 @@ data:
     echo ""
 
     # ── ④ Stall Detection ─────────────────────────────────────────────────────
-    echo "─── ③ Write Stalls (interval > 2× expected = >2000ms) ───────────────"
+    echo "─── ③ Write Stalls (interval > 2× p50 = >${STALL_MS}ms) ──────────────────"
     STALLS=$($PSQL -c "
       WITH intervals AS (
         SELECT seq_num, written_at,
@@ -89,7 +91,7 @@ data:
       )
       SELECT seq_num, to_char(written_at, 'HH24:MI:SS.MS'), ROUND(ms::numeric, 0)
       FROM intervals
-      WHERE ms > 2000 AND ms < 60000
+      WHERE ms > ' || ${STALL_MS} || ' AND ms < ' || ${STALL_CAP} || '
       ORDER BY ms DESC
       LIMIT 10;
     ")
@@ -163,8 +165,9 @@ data:
     while IFS='|' read -r bucket cnt; do
       bucket=$(echo "$bucket" | tr -d ' ')
       cnt=$(echo "$cnt" | tr -d ' ')
-      bar=$(printf '%.0s█' $(seq 1 $cnt))
-      printf "   %s  %-12s  %s rows\n" "$bucket" "$bar" "$cnt"
+      scale=$(( cnt > 20 ? cnt / 20 + 1 : 1 ))
+      bar=$(printf '%.0s█' $(seq 1 $((cnt / scale + 1))))
+      printf "   %s  %-12s  %s rows  (1█=%s)\n" "$bucket" "$bar" "$cnt" "$scale"
     done <<< "$TIMELINE"
 
     echo ""

@@ -9,8 +9,8 @@ data:
 
     DB_HOST="${DB_HOST:-postgres-service}"
     DB_PORT="${DB_PORT:-5432}"
-    WRITE_INTERVAL="${WRITE_INTERVAL:-1}"    # seconds between writes
-    STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-10000}"
+    WRITE_INTERVAL="${WRITE_INTERVAL:-0.1}"    # seconds between writes
+    STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-50000}"
 
     export PGPASSWORD="${POSTGRES_PASSWORD}"
     PSQL="psql -h ${DB_HOST} -p ${DB_PORT} -U ${POSTGRES_USER} -d ${POSTGRES_DB} -t -A"
@@ -20,7 +20,7 @@ data:
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  Host      : ${DB_HOST}:${DB_PORT}"
     echo "  Database  : ${POSTGRES_DB}"
-    echo "  Interval  : ${WRITE_INTERVAL}s per row"
+    echo "  Interval  : ${WRITE_INTERVAL}s per row (10 rows/sec default)"
     echo "  Target    : ${STOP_AFTER_ROWS} rows then exit"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""

@@ -9,8 +9,8 @@ data:
 
     DB_HOST="${DB_HOST:-mariadb-service}"
     DB_PORT="${DB_PORT:-3306}"
-    WRITE_INTERVAL="${WRITE_INTERVAL:-1}"
-    STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-10000}"
+    WRITE_INTERVAL="${WRITE_INTERVAL:-0.1}"
+    STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-50000}"
 
     export MYSQL_PWD="${MARIADB_ROOT_PASSWORD}"
     MYSQL="mariadb -h ${DB_HOST} -P ${DB_PORT} -u root -D ${MARIADB_DATABASE} -Bse"
@@ -20,7 +20,7 @@ data:
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  Host      : ${DB_HOST}:${DB_PORT}"
     echo "  Database  : ${MARIADB_DATABASE}"
-    echo "  Interval  : ${WRITE_INTERVAL}s per row"
+    echo "  Interval  : ${WRITE_INTERVAL}s per row (10 rows/sec default)"
     echo "  Target    : ${STOP_AFTER_ROWS} rows then exit"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 

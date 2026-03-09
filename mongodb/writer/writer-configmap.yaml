@@ -9,8 +9,8 @@ data:
 
     DB_HOST="${DB_HOST:-mongodb-service}"
     DB_PORT="${DB_PORT:-27017}"
-    WRITE_INTERVAL="${WRITE_INTERVAL:-1}"
-    STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-10000}"
+    WRITE_INTERVAL="${WRITE_INTERVAL:-0.1}"
+    STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-50000}"
 
     MONGO_URI="mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@${DB_HOST}:${DB_PORT}/${MONGO_DATABASE}?authSource=admin"
     MONGOSH="mongosh --quiet ${MONGO_URI}"
@@ -20,7 +20,7 @@ data:
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  Host      : ${DB_HOST}:${DB_PORT}"
     echo "  Database  : ${MONGO_DATABASE}"
-    echo "  Interval  : ${WRITE_INTERVAL}s per document"
+    echo "  Interval  : ${WRITE_INTERVAL}s per doc (10 docs/sec default)"
     echo "  Target    : ${STOP_AFTER_ROWS} documents then exit"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 

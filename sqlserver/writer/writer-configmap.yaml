@@ -10,8 +10,8 @@ data:
     DB_HOST="${DB_HOST:-sqlserver-service}"
     DB_PORT="${DB_PORT:-1433}"
     DB_NAME="${MSSQL_DATABASE:-demodb}"
-    WRITE_INTERVAL="${WRITE_INTERVAL:-1}"
-    STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-10000}"
+    WRITE_INTERVAL="${WRITE_INTERVAL:-0.1}"
+    STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-50000}"
 
     SQLCMD="/opt/mssql-tools18/bin/sqlcmd -S ${DB_HOST},${DB_PORT} -U sa -P ${SA_PASSWORD} -No"
 
@@ -20,7 +20,7 @@ data:
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  Host      : ${DB_HOST}:${DB_PORT}"
     echo "  Database  : ${DB_NAME}"
-    echo "  Interval  : ${WRITE_INTERVAL}s per row"
+    echo "  Interval  : ${WRITE_INTERVAL}s per row (10 rows/sec default)"
     echo "  Target    : ${STOP_AFTER_ROWS} rows then exit"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 

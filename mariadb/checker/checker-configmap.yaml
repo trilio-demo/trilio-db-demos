@@ -74,15 +74,17 @@ data:
     P95=$(echo "$LATENCY" | cut -f2)
     P99=$(echo "$LATENCY" | cut -f3)
     MAX=$(echo "$LATENCY" | cut -f4)
+    STALL_MS=$((P50 * 2))           # adaptive: 2× p50
+    STALL_CAP=$((STALL_MS * 30))    # cap excludes restore gap
 
-    echo "   Expected interval : ~1000ms  (1 row/sec)"
+    echo "   Expected interval : ~${P50}ms  (p50 — reference for stall detection)"
     echo "   p50               : ${P50}ms"
     echo "   p95               : ${P95}ms"
     echo "   p99               : ${P99}ms"
     echo "   max               : ${MAX}ms  (large value after restore = gap between backup and writer resuming — expected)"
     echo ""
 
-    echo "─── ③ Write Stalls (interval > 2× expected = >2000ms) ───────────────"
+    echo "─── ③ Write Stalls (interval > 2× p50 = >${STALL_MS}ms) ──────────────────"
     STALLS=$(sql "
       WITH intervals AS (
         SELECT seq_num, written_at,
@@ -92,7 +94,7 @@ data:
       )
       SELECT seq_num, DATE_FORMAT(written_at, '%H:%i:%s'), ms
       FROM intervals
-      WHERE ms > 2000 AND ms < 60000
+      WHERE ms > ${STALL_MS} AND ms < ${STALL_CAP}
       ORDER BY ms DESC
       LIMIT 10;
     ")
@@ -156,8 +158,9 @@ data:
     ")
 
     while IFS=$'\t' read -r bucket cnt; do
-      bar=$(printf '%.0s█' $(seq 1 $cnt))
-      printf "   %s  %-12s  %s rows\n" "$bucket" "$bar" "$cnt"
+      scale=$(( cnt > 20 ? cnt / 20 + 1 : 1 ))
+      bar=$(printf '%.0s█' $(seq 1 $((cnt / scale + 1))))
+      printf "   %s  %-12s  %s rows  (1█=%s)\n" "$bucket" "$bar" "$cnt" "$scale"
     done <<< "$TIMELINE"
 
     echo ""

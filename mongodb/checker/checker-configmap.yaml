@@ -81,7 +81,7 @@ data:
 
       if (latResult.length > 0) {
         const l = latResult[0];
-        print('   Expected interval : ~1000ms  (1 doc/sec)');
+        print('   Expected interval : ~' + Math.round(l.p50[0]) + 'ms  (p50 — reference for stall detection)');
         print('   p50               : ' + Math.round(l.p50[0]) + 'ms');
         print('   p95               : ' + Math.round(l.p95[0]) + 'ms');
         print('   p99               : ' + Math.round(l.p99[0]) + 'ms');
@@ -90,7 +90,9 @@ data:
       print('');
 
       // ── ③ Stall Detection ─────────────────────────────────────────────────
-      print('─── ③ Write Stalls (interval > 2× expected = >2000ms) ───────────────');
+      const stallMs  = latResult.length > 0 ? Math.round(latResult[0].p50[0]) * 2 : 2000;
+      const stallCap = stallMs * 30;
+      print('─── ③ Write Stalls (interval > 2× p50 = >' + stallMs + 'ms) ──────────────────');
       print('   NOTE: A pause during the backup window is expected — it means the');
       print('   fsyncLock write lock was held during the snapshot (correct behavior).');
       const stalls = db.writes_log.aggregate([
@@ -99,7 +101,7 @@ data:
             output: { prevTs: { \$shift: { output: '\$written_at', by: -1 } } } } },
         { \$match: { prevTs: { \$ne: null } } },
         { \$addFields: { interval_ms: { \$subtract: ['\$written_at', '\$prevTs'] } } },
-        { \$match: { interval_ms: { \$gt: 2000 } } },
+        { \$match: { interval_ms: { \$gt: stallMs, \$lt: stallCap } } },
         { \$sort: { interval_ms: -1 } },
         { \$limit: 10 }
       ]).toArray();
@@ -156,8 +158,10 @@ data:
 
       timeline.forEach(b => {
         const t = b._id.toISOString().substring(11,19);
-        const bar = '█'.repeat(b.cnt);
-        print('   ' + t + '  ' + bar.padEnd(12) + '  ' + b.cnt + ' docs');
+        const scale = b.cnt > 20 ? Math.ceil(b.cnt / 20) : 1;
+        const bar = '█'.repeat(Math.ceil(b.cnt / scale));
+        const scaleLabel = scale > 1 ? '  (1█=' + scale + ')' : '';
+        print('   ' + t + '  ' + bar.padEnd(12) + '  ' + b.cnt + ' docs' + scaleLabel);
       });
 
       print('');
