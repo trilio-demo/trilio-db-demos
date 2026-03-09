@@ -13,7 +13,9 @@ A naive volume snapshot of a running database can capture dirty buffers, uncommi
 
 Trilio for Kubernetes's Hook mechanism runs quiesce/unquiesce commands **inside the database container** immediately before and after the volume snapshot, ensuring the database engine flushes its state to disk at exactly the right moment.
 
-This repo proves it: a **writer Job** inserts numbered rows at 1 row/sec (10,000 rows total, ~2.7h) then exits automatically, and a **consistency checker** verifies zero gaps in the sequence after restore.
+This repo proves it: a **writer Job** inserts numbered rows continuously, and a **consistency checker** verifies zero sequence gaps, correct data format, storage-level integrity, and full read-write capability after restore.
+
+> **Branch `feat/high-pressure-writes`** (this branch): writers default to **10 rows/sec** (50,000 rows, ~83 min) to stress the hook under realistic I/O pressure. The checkers adapt their stall-detection threshold to the measured write rate (2× p50 latency), and timeline charts auto-scale. See [High-Pressure Write Mode](#high-pressure-write-mode) below.
 
 ---
 
@@ -161,6 +163,46 @@ With PITR:
 | SQL Server | Transaction log (scheduled) | Native `BACKUP LOG TO URL` | `RESTORE LOG ... STOPAT` |
 
 Each database's `pitr/` folder contains the manifests and a full recovery procedure.
+
+---
+
+## High-Pressure Write Mode
+
+This branch increases write throughput to stress the hook and snapshot mechanism under realistic I/O pressure.
+
+| Parameter | `main` (baseline) | `feat/high-pressure-writes` |
+|---|---|---|
+| `WRITE_INTERVAL` | `1.0s` (1 row/sec) | `0.1s` (10 rows/sec) |
+| `STOP_AFTER_ROWS` | `10,000` (~2.7h) | `50,000` (~83 min) |
+| Checker stall threshold | hardcoded `>2000ms` | adaptive: `>2× p50` latency |
+| Timeline bar scale | `1█ = 1 row` | `1█ = N rows` (auto-scales for 50k rows) |
+
+### Why This Matters
+
+At 10 rows/sec, the database is doing **10× more I/O** during the hook window. This tests:
+- Whether `CHECKPOINT` / `FLUSH TABLES` / `fsyncLock` complete fast enough under load
+- Whether the snapshot window widens perceptibly (visible in ③ Write Stalls)
+- Whether the consistency checker correctly identifies the restore boundary when there are thousands of rows around it
+
+### Override at Runtime
+
+Both parameters are environment variables — override them without changing manifests:
+
+```bash
+# 100 rows/sec stress test
+kubectl set env job/postgres-writer WRITE_INTERVAL=0.01 STOP_AFTER_ROWS=100000 -n trilio-demo
+```
+
+### Adaptive Checker Behavior
+
+The stall detection section (③) now shows the actual p50 latency as the reference point:
+
+```
+─── ③ Write Stalls (interval > 2× p50 = >200ms) ──────────────────
+   ✅ No stalls detected — hook and snapshot did not delay writes.
+```
+
+If the hook causes a write pause (expected for MongoDB `fsyncLock` and MariaDB `FLUSH TABLES`), it appears here clearly — and is capped at `30× stall_threshold` so the restore gap doesn't pollute the stall list.
 
 ---
 

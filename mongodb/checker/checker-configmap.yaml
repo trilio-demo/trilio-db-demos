@@ -165,9 +165,73 @@ data:
       });
 
       print('');
+
+      // ── ⑥ Data Integrity ─────────────────────────────────────────────────
+      print('─── ⑥ Data Integrity ────────────────────────────────────────────────');
+
+      const sumResult = db.writes_log.aggregate([
+        { \$group: { _id: null, total: { \$sum: { \$toLong: '\$seq_num' } } } }
+      ]).toArray();
+      const checksum = sumResult.length > 0 ? sumResult[0].total : 0;
+      print('   seq_num checksum (SUM) : ' + checksum);
+      print('   ℹ️  Record this value before and after restore — must match.');
+      print('');
+
+      print('   Spot-check (5 docs, note format = "trilio-demo-write-N"):');
+      const sample = db.writes_log.aggregate([{ \$sample: { size: 5 } }]).toArray();
+      let scBad = 0;
+      sample.forEach(d => {
+        const ok = /^trilio-demo-write-\d+$/.test(d.note);
+        if (!ok) scBad++;
+        print('      ' + d.seq_num + ' | ' + d.note + (ok ? '' : '  ← UNEXPECTED'));
+      });
+      if (scBad === 0) {
+        print('   ✅ All spot-checked docs have correct note format');
+      } else {
+        print('   ❌ ' + scBad + ' doc(s) with unexpected note format');
+      }
+      print('');
+
+      print('   Collection validate() — WiredTiger storage consistency:');
+      const vResult = db.writes_log.validate({ full: true });
+      if (vResult.valid) {
+        print('   ✅ validate() passed — no WiredTiger corruption detected');
+        print('   ℹ️  Errors: ' + vResult.errors.length + '  Warnings: ' + vResult.warnings.length);
+      } else {
+        print('   ❌ validate() FAILED:');
+        vResult.errors.forEach(e => print('      ' + e));
+      }
+      print('');
+
+      const stats = db.writes_log.stats();
+      print('   Collection size : ' + (stats.size / 1024).toFixed(1) + ' KB');
+      print('   Index count     : ' + stats.nindexes);
+      print('');
+
+      // ── ⑦ Post-Restore Write Test ─────────────────────────────────────────
+      print('─── ⑦ Post-Restore Write Test ───────────────────────────────────────');
+      const nextSeq = db.writes_log.find().sort({ seq_num: -1 }).limit(1).toArray()[0]?.seq_num + 1 || 1;
+      let writeOk = false;
+      try {
+        db.writes_log.insertOne({ seq_num: nextSeq, written_at: new Date(), note: 'checker-write-test' });
+        const readBack = db.writes_log.findOne({ seq_num: nextSeq });
+        if (readBack && readBack.note === 'checker-write-test') {
+          print('   ✅ insertOne + findOne verified (seq=' + nextSeq + ')');
+          writeOk = true;
+        } else {
+          print('   ❌ insertOne succeeded but findOne returned unexpected value');
+        }
+        db.writes_log.deleteOne({ seq_num: nextSeq });
+        print('   ✅ deleteOne cleanup completed — database is fully read-write');
+      } catch (e) {
+        print('   ❌ Write test failed: ' + e.message);
+      }
+      print('');
+
       print(DIV);
-      if (gaps === 0 && total === expected) {
-        print('  ✅  OVERALL: PASSED — data is complete and consistent');
+      const integrityOk = gaps === 0 && total === expected && writeOk;
+      if (integrityOk) {
+        print('  ✅  OVERALL: PASSED — data is complete, consistent, and writable');
       } else {
         print('  ❌  OVERALL: FAILED — data integrity issues detected');
         quit(1);
