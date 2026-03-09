@@ -1,0 +1,16 @@
+apiVersion: triliovault.trilio.io/v1
+kind: Restore
+metadata:
+  name: all-dbs-restore
+  namespace: trilio-demo
+spec:
+  source:
+    type: Backup
+    backup:
+      name: all-dbs-backup
+      namespace: trilio-demo
+  # skipIfAlreadyExists: resources that were not deleted (e.g. operator-injected
+  # ConfigMaps like odh-kserve-custom-ca-bundle) are left as-is.
+  # Pre-delete DB workloads with: ./test.sh cleanup
+  restoreFlags:
+    skipIfAlreadyExists: true

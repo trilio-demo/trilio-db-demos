@@ -1,0 +1,58 @@
+apiVersion: triliovault.trilio.io/v1
+kind: BackupPlan
+metadata:
+  name: all-dbs-backupplan
+  namespace: trilio-demo
+spec:
+  backupConfig:
+    # ─── TARGET ─────────────────────────────────────────────────────────────
+    # Adapt to match your pre-configured Trilio for Kubernetes Target CR.
+    target:
+      name: <YOUR_TARGET_NAME>    # ← replace with your Target CR name
+      namespace: <YOUR_TARGET_NS> # ← replace with your Target CR namespace
+
+  # ─── HOOK CONFIGURATION ─────────────────────────────────────────────────
+  # Parallel mode: all 4 database hooks fire simultaneously.
+  # Each hook quiesces its own DB (checkpoint/flush/lock) while the volume
+  # snapshot is taken, then resumes — all at the same instant.
+  hookConfig:
+    mode: Parallel
+    hooks:
+      - hook:
+          name: postgres-hook
+          namespace: trilio-demo
+        podSelector:
+          labels:
+            - matchLabels:
+                app: postgres
+        containerRegex: "postgres"
+
+      - hook:
+          name: mariadb-hook
+          namespace: trilio-demo
+        podSelector:
+          labels:
+            - matchLabels:
+                app: mariadb
+        containerRegex: "mariadb"
+
+      - hook:
+          name: mongodb-hook
+          namespace: trilio-demo
+        podSelector:
+          labels:
+            - matchLabels:
+                app: mongodb
+        containerRegex: "mongodb"
+
+      - hook:
+          name: sqlserver-hook
+          namespace: trilio-demo
+        podSelector:
+          labels:
+            - matchLabels:
+                app: sqlserver
+        containerRegex: "sqlserver"
+
+  # Capture everything in the namespace: all 4 DBs, PVCs, Secrets, ConfigMaps.
+  backupPlanComponents: {}
