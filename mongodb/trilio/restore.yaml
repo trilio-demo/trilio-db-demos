@@ -9,8 +9,10 @@ spec:
     backup:
       name: mongodb-demo-backup
       namespace: trilio-demo
+  excludeResources:
+    - apiVersion: v1
+      kind: ConfigMap
+      name: odh-kserve-custom-ca-bundle
   cleanupConfig:
-    enabled: true                       # ← in-place restore: T4K cleans up the
-    gracefulDeletionTimeoutSeconds: 120  #   namespace and restores from backup.
-                                         #   Namespace is preserved — no need to
-                                         #   reconfigure targets or credentials.
+    enabled: true
+    gracefulDeletionTimeoutSeconds: 120
