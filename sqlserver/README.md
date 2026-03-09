@@ -22,6 +22,10 @@ SQL Server has stricter infrastructure requirements than the other databases:
 # STEP 1 — Create namespace and deploy SQL Server
 #          SQL Server takes 30–60s to initialize — wait for ready before proceeding
 kubectl create namespace trilio-demo
+
+# OpenShift only: SQL Server requires UID/GID 10001 — grant anyuid SCC
+oc adm policy add-scc-to-user anyuid -z default -n trilio-demo
+
 kubectl apply -f deploy/ -n trilio-demo
 kubectl rollout status statefulset/sqlserver -n trilio-demo
 
