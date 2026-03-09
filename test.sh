@@ -4,7 +4,9 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
 #  Usage:
-#    ./test.sh deploy              Deploy all 4 databases + writers
+#    ./test.sh deploy              Deploy all 4 databases + writers (1 row/sec, 10k rows)
+#    ./test.sh deploy --high-pressure
+#                                  Deploy with high-pressure writers (10 rows/sec, 50k rows)
 #    ./test.sh backup              Create backup, wait for completion
 #    ./test.sh restore [db]        Cleanup workloads, restore, wait
 #                                    db = postgres|mariadb|mongodb|sqlserver|all (default: all)
@@ -15,6 +17,8 @@
 #                                    db = postgres|mariadb|mongodb|sqlserver|all (default: all)
 #    ./test.sh nuke                Delete the entire namespace (start fresh)
 #    ./test.sh full                deploy → backup → restore all → check all (E2E)
+#    ./test.sh full --high-pressure
+#                                  Full E2E test with high-pressure writers
 #
 #  Environment overrides:
 #    NAMESPACE      (default: trilio-demo)
@@ -36,6 +40,7 @@ TIMEOUT_CHECK="${TIMEOUT_CHECK:-300}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DBS=(postgres mariadb mongodb sqlserver)
+HIGH_PRESSURE=0   # set to 1 via --high-pressure flag
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -183,9 +188,18 @@ cmd_deploy() {
   done
 
   step "Deploying writers"
+  if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
+    info "High-pressure mode: 10 rows/sec, 50,000 rows per database"
+  else
+    info "Standard mode: 1 row/sec, 10,000 rows per database"
+  fi
   for db in "${DBS[@]}"; do
     local dir="$SCRIPT_DIR/$db"
-    kapply "$dir/writer/writer-configmap.yaml"
+    if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
+      kapply "$dir/writer/writer-configmap-highpressure.yaml"
+    else
+      kapply "$dir/writer/writer-configmap.yaml"
+    fi
     # Delete existing writer job if present (jobs are immutable)
     kubectl delete job "${db}-writer" -n "$NS" --ignore-not-found > /dev/null 2>&1
     kapply "$dir/writer/writer-job.yaml"
@@ -483,8 +497,17 @@ summary() {
 }
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
-CMD="${1:-help}"
-ARG2="${2:-all}"
+# Parse flags (--high-pressure can appear anywhere after the command)
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --high-pressure) HIGH_PRESSURE=1 ;;
+    *) ARGS+=("$arg") ;;
+  esac
+done
+
+CMD="${ARGS[0]:-help}"
+ARG2="${ARGS[1]:-all}"
 
 case "$CMD" in
   deploy)   cmd_deploy ;;
@@ -496,7 +519,7 @@ case "$CMD" in
   nuke)     cmd_nuke ;;
   full)     cmd_full ;;
   help|--help|-h)
-    sed -n '/^#  Usage:/,/^# ━/p' "$0" | head -20
+    sed -n '/^#  Usage:/,/^# ━/p' "$0" | head -25
     ;;
   *)
     die "Unknown command '$CMD'. Run './test.sh help' for usage."
