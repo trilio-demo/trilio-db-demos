@@ -91,6 +91,29 @@ kubectl logs -f job/postgres-consistency-checker -n trilio-demo
 
 Repeat the same pattern for `mariadb/`, `mongodb/`, or `sqlserver/`.
 
+> **Shared namespace (recommended):** The `shared/` folder and `test.sh` at the repo root let you deploy, backup, restore, and check all 4 databases in a single namespace with one command. See [shared/README.md](./shared/README.md).
+
+---
+
+## Write Modes
+
+Each database has two writer configmaps:
+
+| File | Mode | Rate | Rows | ~Duration |
+|------|------|------|------|-----------|
+| `writer-configmap.yaml` | Standard | 1 row/sec | 10,000 | 2.7h |
+| `writer-configmap-highpressure.yaml` | High-pressure | 10 rows/sec | 50,000 | 83 min |
+
+Using `test.sh`, select the mode at deploy time:
+
+```bash
+./test.sh deploy                  # standard
+./test.sh deploy --high-pressure  # stress — 10× the I/O during the hook window
+./test.sh full --high-pressure    # full E2E with stress writers
+```
+
+The flag only affects which writer configmap is applied. All other commands (backup, restore, check) work identically in both modes.
+
 ---
 
 ## The Demo Story

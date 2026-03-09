@@ -21,7 +21,7 @@ trilio-demo namespace
 ```bash
 # 1. Edit shared/trilio/backupplan.yaml — set your Target name and namespace
 
-# 2. Deploy everything
+# 2. Deploy everything (standard mode: 1 row/sec, 10,000 rows per DB)
 ./test.sh deploy
 
 # 3. Let writers run, then take a backup
@@ -39,6 +39,29 @@ trilio-demo namespace
 # Or run the full end-to-end test in one command:
 ./test.sh full
 ```
+
+## Write Modes
+
+Each database has two writer configmaps in its `writer/` folder:
+
+| File | Mode | Rate | Rows | Duration |
+|------|------|------|------|----------|
+| `writer-configmap.yaml` | Standard | 1 row/sec | 10,000 | ~2.7h |
+| `writer-configmap-highpressure.yaml` | High-pressure | 10 rows/sec | 50,000 | ~83 min |
+
+Pass `--high-pressure` to `deploy` or `full` to use the stress writers:
+
+```bash
+# High-pressure: 10 rows/sec — stresses the hook under realistic I/O load
+./test.sh deploy --high-pressure
+./test.sh full --high-pressure
+
+# Standard: 1 row/sec — baseline behaviour, matches the original demo
+./test.sh deploy
+./test.sh full
+```
+
+The `--high-pressure` flag only controls which writer configmap is applied at deploy time. Backup, restore, check, status, and cleanup commands are unaffected.
 
 ## Individual DB Operations
 
