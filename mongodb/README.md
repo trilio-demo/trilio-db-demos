@@ -14,8 +14,9 @@ kubectl create namespace trilio-demo
 kubectl apply -f deploy/ -n trilio-demo
 kubectl rollout status statefulset/mongodb -n trilio-demo
 
-# STEP 2 — Start the continuous writer
-kubectl apply -f writer/ -n trilio-demo
+# STEP 2 — Start the continuous writer (standard: 1 row/sec, 10,000 rows)
+kubectl apply -f writer/writer-configmap.yaml -n trilio-demo
+kubectl apply -f writer/writer-job.yaml -n trilio-demo
 
 # Terminal 2 — confirm rows are being written (keep open during backup)
 kubectl logs -f job/mongodb-writer -n trilio-demo
@@ -66,6 +67,8 @@ Unlike PostgreSQL and MariaDB (where writes continue uninterrupted), with MongoD
 ```
 
 The consistency checker will confirm **zero gaps** — row 106 was not lost, just delayed.
+
+> **Automated path:** `test.sh` at the repo root runs the full deploy → backup → restore → check workflow for all 4 databases with a single command. See [shared/README.md](../shared/README.md).
 
 ---
 

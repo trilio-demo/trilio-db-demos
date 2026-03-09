@@ -30,10 +30,11 @@ This repo proves it: a **writer Job** inserts numbered rows at 1 row/sec (10,000
 
 ## Prerequisites
 
-- Kubernetes cluster (1.25+)
+- Kubernetes cluster (1.25+) with a **CSI driver that supports VolumeSnapshots** (e.g. `ebs.csi.aws.com`, `disk.csi.azure.com`, `pd.csi.storage.gke.io`, or any driver with a `VolumeSnapshotClass`)
 - Trilio for Kubernetes installed
 - A Trilio for Kubernetes **Target** pre-configured in your cluster (S3, NFS, or other)
 - `kubectl` configured for your cluster
+- For OpenShift: `oc` CLI available (used by `test.sh` for SCC configuration)
 
 ---
 
@@ -42,18 +43,25 @@ This repo proves it: a **writer Job** inserts numbered rows at 1 row/sec (10,000
 ```
 trilio-db-demos/
 ├── README.md                   ← You are here
+├── test.sh                     ← Automated E2E test: deploy / backup / restore / check
+├── shared/
+│   ├── README.md               ← Shared-namespace workflow (recommended entry point)
+│   └── trilio/                 ← Combined BackupPlan, Backup, Restore CRs (all 4 DBs)
 ├── postgres/
 │   ├── README.md               ← PostgreSQL-specific guide & hook rationale
 │   ├── deploy/                 ← StatefulSet, Service, Secret
-│   ├── writer/                 ← Writer Job (10k rows, auto-terminates) + ConfigMap
+│   ├── writer/                 ← Writer Job (10k rows, auto-terminates) + ConfigMaps
 │   ├── checker/                ← Post-restore consistency verifier (Job)
-│   ├── trilio/                 ← Hook, BackupPlan, Backup CRs
+│   ├── trilio/                 ← Hook + per-DB BackupPlan/Backup CRs
 │   └── pitr/                   ← WAL archiving to S3 (WAL-G sidecar + docs)
 ├── mariadb/
+│   ├── ...                     ← Same structure as postgres/
 │   └── pitr/                   ← Binary log archiving to S3 (WAL-G sidecar + docs)
 ├── mongodb/
+│   ├── ...                     ← Same structure as postgres/
 │   └── pitr/                   ← Oplog archiving to S3 (WAL-G sidecar + docs)
 └── sqlserver/
+    ├── ...                     ← Same structure as postgres/
     └── pitr/                   ← Native BACKUP LOG TO S3 (CronJob + docs)
 ```
 
@@ -75,10 +83,12 @@ kubectl rollout status statefulset/postgres -n trilio-demo
 kubectl apply -f postgres/writer/ -n trilio-demo
 
 # 5. Watch the writes in one terminal (keep this open!)
-kubectl logs -f deployment/postgres-writer -n trilio-demo
+kubectl logs -f job/postgres-writer -n trilio-demo
 
 # 6. Apply Trilio for Kubernetes resources (edit target name in backupplan.yaml first)
-kubectl apply -f postgres/trilio/ -n trilio-demo
+#    ⚠️  Apply individually — backup.yaml triggers a backup immediately if applied
+kubectl apply -f postgres/trilio/hook.yaml -n trilio-demo
+kubectl apply -f postgres/trilio/backupplan.yaml -n trilio-demo
 
 # 7. Trigger a backup — watch writes continue uninterrupted
 kubectl apply -f postgres/trilio/backup.yaml -n trilio-demo
@@ -91,7 +101,7 @@ kubectl logs -f job/postgres-consistency-checker -n trilio-demo
 
 Repeat the same pattern for `mariadb/`, `mongodb/`, or `sqlserver/`.
 
-> **Shared namespace (recommended):** The `shared/` folder and `test.sh` at the repo root let you deploy, backup, restore, and check all 4 databases in a single namespace with one command. See [shared/README.md](./shared/README.md).
+> **Shared namespace (recommended):** `test.sh` at the repo root automates the full workflow — deploy, backup, restore, and check all 4 databases in a single namespace with one command. See [shared/README.md](./shared/README.md) for the quickest path.
 
 ---
 

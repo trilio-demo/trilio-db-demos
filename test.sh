@@ -413,7 +413,7 @@ cmd_nuke() {
   div
   echo -e "${RED}${BOLD}  NUKE — deleting namespace $NS entirely${NC}"
   div
-  read -r -p "  Are you sure? This deletes all databases and backups in the namespace. [y/N] " confirm
+  read -r -p "  Are you sure? This deletes the namespace and all Kubernetes objects (Backup CRs, PVCs, etc.). Backup data already written to the Target (S3/NFS) is NOT deleted. [y/N] " confirm
   if [[ "$confirm" =~ ^[Yy]$ ]]; then
     kubectl delete namespace "$NS" --ignore-not-found
     pass "Namespace $NS deleted"
@@ -425,7 +425,7 @@ cmd_nuke() {
 cmd_full() {
   div
   echo -e "${BOLD}  FULL E2E TEST${NC}"
-  echo -e "  deploy → wait 2min → backup → restore all → check all"
+  echo -e "  deploy → wait 2min → backup → wait 1min → restore all → check all"
   div
 
   cmd_deploy
