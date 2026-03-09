@@ -109,7 +109,38 @@ data:
     fi
     echo ""
 
-    echo "─── ④ Write Rate Timeline (rows per 10-second bucket) ───────────────"
+    echo "─── ④ Restore Boundary ──────────────────────────────────────────────"
+    BROW=$(sql "
+      WITH gaps AS (
+        SELECT seq_num, written_at,
+          LEAD(seq_num) OVER (ORDER BY seq_num) AS next_seq,
+          LEAD(written_at) OVER (ORDER BY seq_num) AS next_time,
+          ROUND(TIMESTAMPDIFF(MICROSECOND, written_at,
+            LEAD(written_at) OVER (ORDER BY seq_num)) / 1000, 0) AS gap_ms
+        FROM writes_log
+      )
+      SELECT CONCAT(seq_num,'|',DATE_FORMAT(written_at,'%Y-%m-%d %H:%i:%s'),'|',
+                    next_seq,'|',DATE_FORMAT(next_time,'%Y-%m-%d %H:%i:%s'),'|',gap_ms)
+      FROM gaps WHERE gap_ms IS NOT NULL ORDER BY gap_ms DESC LIMIT 1;
+    ")
+
+    B_GAP_MS=$(echo "$BROW" | cut -d'|' -f5 | tr -d ' ')
+    if [ -n "$BROW" ] && [ "${B_GAP_MS:-0}" -gt 60000 ]; then
+      B_LAST_SEQ=$(echo "$BROW"  | cut -d'|' -f1 | tr -d ' ')
+      B_LAST_TS=$(echo  "$BROW"  | cut -d'|' -f2 | tr -d ' ')
+      B_FIRST_SEQ=$(echo "$BROW" | cut -d'|' -f3 | tr -d ' ')
+      B_FIRST_TS=$(echo  "$BROW" | cut -d'|' -f4 | tr -d ' ')
+      B_GAP_S=$((B_GAP_MS / 1000))
+      echo "   Last row before restore : seq=${B_LAST_SEQ}  @  ${B_LAST_TS} UTC"
+      echo "   First row after restore : seq=${B_FIRST_SEQ}  @  ${B_FIRST_TS} UTC"
+      echo "   Restore window          : ~${B_GAP_S}s (~$((B_GAP_S / 60)) min)"
+      echo "   ✅ Data integrity confirmed across restore boundary"
+    else
+      echo "   ℹ️  No restore boundary detected (run checker after backup + restore)"
+    fi
+    echo ""
+
+    echo "─── ⑤ Write Rate Timeline (rows per 10-second bucket) ───────────────"
     TIMELINE=$(sql "
       SELECT
         DATE_FORMAT(

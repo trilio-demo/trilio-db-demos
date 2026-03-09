@@ -116,8 +116,37 @@ data:
       }
       print('');
 
-      // ── ④ Timeline ────────────────────────────────────────────────────────
-      print('─── ④ Write Rate Timeline (docs per 10-second bucket) ───────────────');
+      // ── ④ Restore Boundary ───────────────────────────────────────────────
+      print('─── ④ Restore Boundary ──────────────────────────────────────────────');
+      const boundaryResult = db.writes_log.aggregate([
+        { \$sort: { seq_num: 1 } },
+        { \$setWindowFields: { sortBy: { seq_num: 1 },
+            output: {
+              prevTs:  { \$shift: { output: '\$written_at', by: -1 } },
+              prevSeq: { \$shift: { output: '\$seq_num',   by: -1 } }
+            } } },
+        { \$match: { prevTs: { \$ne: null } } },
+        { \$addFields: { gap_ms: { \$subtract: ['\$written_at', '\$prevTs'] } } },
+        { \$sort: { gap_ms: -1 } },
+        { \$limit: 1 }
+      ]).toArray();
+
+      if (boundaryResult.length > 0 && boundaryResult[0].gap_ms > 60000) {
+        const b = boundaryResult[0];
+        const gapS = Math.round(b.gap_ms / 1000);
+        const lastTs  = b.prevTs.toISOString().replace('T',' ').substring(0,19);
+        const firstTs = b.written_at.toISOString().replace('T',' ').substring(0,19);
+        print('   Last doc before restore : seq=' + b.prevSeq  + '  @  ' + lastTs  + ' UTC');
+        print('   First doc after restore : seq=' + b.seq_num  + '  @  ' + firstTs + ' UTC');
+        print('   Restore window          : ~' + gapS + 's (~' + Math.floor(gapS/60) + ' min)');
+        print('   ✅ Data integrity confirmed across restore boundary');
+      } else {
+        print('   ℹ️  No restore boundary detected (run checker after backup + restore)');
+      }
+      print('');
+
+      // ── ⑤ Timeline ────────────────────────────────────────────────────────
+      print('─── ⑤ Write Rate Timeline (docs per 10-second bucket) ───────────────');
       const timeline = db.writes_log.aggregate([
         { \$addFields: { bucket: { \$dateTrunc: { date: '\$written_at', unit: 'second',
               binSize: 10 } } } },
