@@ -43,9 +43,9 @@ BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 PASS_COUNT=0; FAIL_COUNT=0; WARN_COUNT=0
 
-pass() { echo -e "${GREEN}  ✅  $1${NC}"; ((PASS_COUNT++)); }
-fail() { echo -e "${RED}  ❌  $1${NC}"; ((FAIL_COUNT++)); }
-warn() { echo -e "${YELLOW}  ⚠️   $1${NC}"; ((WARN_COUNT++)); }
+pass() { echo -e "${GREEN}  ✅  $1${NC}"; PASS_COUNT=$((PASS_COUNT + 1)); }
+fail() { echo -e "${RED}  ❌  $1${NC}"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
+warn() { echo -e "${YELLOW}  ⚠️   $1${NC}"; WARN_COUNT=$((WARN_COUNT + 1)); }
 info() { echo -e "${BLUE}  ℹ️   $1${NC}"; }
 step() { echo -e "\n${BOLD}${CYAN}▶ $1${NC}"; }
 div()  { echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
@@ -207,6 +207,12 @@ cmd_backup() {
   div
   echo -e "${BOLD}  BACKUP — $BACKUP_NAME${NC}"
   div
+
+  step "Checking BackupPlan target is configured"
+  if grep -q '<YOUR_TARGET' "$SCRIPT_DIR/shared/trilio/backupplan.yaml" 2>/dev/null; then
+    die "shared/trilio/backupplan.yaml still has placeholder values.\nEdit it and replace <YOUR_TARGET_NAME> and <YOUR_TARGET_NS> with your Trilio Target CR name/namespace."
+  fi
+  pass "BackupPlan target is configured"
 
   step "Checking writers are running"
   for db in "${DBS[@]}"; do

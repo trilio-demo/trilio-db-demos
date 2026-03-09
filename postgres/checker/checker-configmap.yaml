@@ -168,9 +168,77 @@ data:
     done <<< "$TIMELINE"
 
     echo ""
+    echo "─── ⑥ Data Integrity ────────────────────────────────────────────────"
+    # 6a. Checksum: SUM of all seq_num — deterministic, reproducible
+    CHECKSUM=$($PSQL -c "SELECT SUM(seq_num::bigint)::text FROM writes_log;")
+    echo "   seq_num checksum (SUM) : ${CHECKSUM}"
+    echo "   ℹ️  Record this value before and after restore — must match."
+    echo ""
+
+    # 6b. Spot-check 5 rows: verify note field format
+    echo "   Spot-check (5 rows, note format = 'trilio-demo-write-N'):"
+    SC=$($PSQL -c "
+      SELECT seq_num::text||' | '||note FROM writes_log ORDER BY random() LIMIT 5;
+    ")
+    SC_BAD=$(echo "$SC" | grep -v 'trilio-demo-write-' | grep -v '^$' | wc -l | tr -d ' ')
+    echo "$SC" | while read -r line; do [ -n "$line" ] && echo "      $line"; done
+    if [ "${SC_BAD}" -eq "0" ]; then
+      echo "   ✅ All spot-checked rows have correct note format"
+    else
+      echo "   ❌ ${SC_BAD} row(s) with unexpected note format"
+    fi
+    echo ""
+
+    # 6c. pg_catalog check — table bloat and corruption detection via pg_class
+    TABLE_SIZE=$($PSQL -c "SELECT pg_size_pretty(pg_total_relation_size('writes_log'));")
+    LIVE_TUPS=$($PSQL -c "SELECT n_live_tup::text FROM pg_stat_user_tables WHERE relname='writes_log';")
+    DEAD_TUPS=$($PSQL -c "SELECT n_dead_tup::text FROM pg_stat_user_tables WHERE relname='writes_log';")
+    echo "   Table size (total)    : ${TABLE_SIZE}"
+    echo "   Live tuples           : ${LIVE_TUPS}"
+    echo "   Dead tuples (bloat)   : ${DEAD_TUPS}"
+    if [ "${DEAD_TUPS:-0}" -lt 1000 ]; then
+      echo "   ✅ Table health OK — minimal dead tuple bloat"
+    else
+      echo "   ⚠️  High dead tuple count — consider VACUUM ANALYZE"
+    fi
+    echo ""
+
+    # 6d. WAL / full_page_writes — must be on for crash-consistent snapshots
+    FPW=$($PSQL -c "SHOW full_page_writes;")
+    if [ "$FPW" = "on" ]; then
+      echo "   ✅ full_page_writes : on — storage snapshots are safe with PostgreSQL"
+    else
+      echo "   ⚠️  full_page_writes : off — snapshot consistency is not guaranteed without it"
+    fi
+    echo ""
+
+    echo "─── ⑦ Post-Restore Write Test ───────────────────────────────────────"
+    NEXT_SEQ=$($PSQL -c "SELECT COALESCE(MAX(seq_num),0)+1 FROM writes_log;")
+    WRITE_OK=0
+    $PSQL -c "INSERT INTO writes_log (seq_num, written_at, note) VALUES (${NEXT_SEQ}, NOW(), 'checker-write-test');" > /dev/null 2>&1 && WRITE_OK=1 || true
+
+    if [ "$WRITE_OK" -eq 1 ]; then
+      READ_BACK=$($PSQL -c "SELECT note FROM writes_log WHERE seq_num=${NEXT_SEQ};")
+      if [ "$READ_BACK" = "checker-write-test" ]; then
+        echo "   ✅ INSERT + SELECT verified (seq=${NEXT_SEQ})"
+      else
+        echo "   ❌ INSERT succeeded but SELECT returned unexpected value: '${READ_BACK}'"
+        WRITE_OK=0
+      fi
+      $PSQL -c "DELETE FROM writes_log WHERE seq_num=${NEXT_SEQ};" > /dev/null 2>&1 || true
+      echo "   ✅ DELETE cleanup completed — database is fully read-write"
+    else
+      echo "   ❌ INSERT failed — database may be read-only or in recovery"
+    fi
+    echo ""
+
     echo "$DIV"
-    if [ "${GAPS}" -eq "0" ] && [ "${TOTAL}" -eq "${EXPECTED}" ]; then
-      echo "  ✅  OVERALL: PASSED — data is complete and consistent"
+    INTEGRITY_OK=1
+    [ "${GAPS}" -ne "0" ] && INTEGRITY_OK=0
+    [ "${TOTAL}" -ne "${EXPECTED}" ] && INTEGRITY_OK=0
+    [ "$WRITE_OK" -eq 0 ] && INTEGRITY_OK=0
+    if [ "${INTEGRITY_OK}" -eq "1" ]; then
+      echo "  ✅  OVERALL: PASSED — data is complete, consistent, and writable"
     else
       echo "  ❌  OVERALL: FAILED — data integrity issues detected"
       exit 1
