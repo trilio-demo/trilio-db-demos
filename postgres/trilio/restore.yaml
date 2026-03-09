@@ -9,10 +9,6 @@ spec:
     backup:
       name: postgres-demo-backup
       namespace: trilio-demo
-  excludeResources:
-    - apiVersion: v1
-      kind: ConfigMap
-      name: odh-kserve-custom-ca-bundle
   cleanupConfig:
     enabled: true
     gracefulDeletionTimeoutSeconds: 120
