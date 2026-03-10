@@ -228,7 +228,7 @@ data:
         echo "   ❌ INSERT succeeded but SELECT returned unexpected value: '${READ_BACK}'"
         WRITE_OK=0
       fi
-      $PSQL -c "DELETE FROM writes_log WHERE seq_num=${NEXT_SEQ};" > /dev/null 2>&1 || true
+      $PSQL -c "DELETE FROM writes_log WHERE seq_num=${NEXT_SEQ} AND note='checker-write-test';" > /dev/null 2>&1 || true
       echo "   ✅ DELETE cleanup completed — database is fully read-write"
     else
       echo "   ❌ INSERT failed — database may be read-only or in recovery"
