@@ -468,8 +468,8 @@ _run_backup_restore_check() {
   # Shared tail: wait → backup → wait → restore → check
 
   step "Waiting for all writer pods to be Running"
-  local deadline=$(( $(date +%s) + 300 ))   # 5-minute timeout
   for db in "${DBS[@]}"; do
+    local deadline=$(( $(date +%s) + 300 ))   # 5-minute timeout per DB
     while true; do
       local phase
       phase=$(kubectl get pods -n "$NS" -l "app=${db}-writer" --no-headers 2>/dev/null \
