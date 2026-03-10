@@ -16,10 +16,10 @@
 #    ./test.sh cleanup [db]        Delete workload resources (keep namespace + data at rest)
 #                                    db = postgres|mariadb|mongodb|sqlserver|all (default: all)
 #    ./test.sh nuke                Delete the entire namespace (start fresh)
-#    ./test.sh full                deploy → backup → restore all → check all (E2E)
+#    ./test.sh full                deploy → backup → wipe sts+pvcs → restore → check (E2E)
 #    ./test.sh full --high-pressure
 #                                  Full E2E test with high-pressure writers
-#    ./test.sh cycle               delete+restart writers → backup → restore all → check all (skip deploy)
+#    ./test.sh cycle               delete+restart writers → backup → wipe sts+pvcs → restore → check (skip deploy)
 #    ./test.sh cycle --high-pressure
 #                                  Same but with high-pressure writers
 #
@@ -455,6 +455,28 @@ _run_writers() {
 
 _run_backup_restore_check() {
   # Shared tail: wait → backup → wait → restore → check
+
+  step "Waiting for all writer pods to be Running"
+  local deadline=$(( $(date +%s) + 300 ))   # 5-minute timeout
+  for db in "${DBS[@]}"; do
+    while true; do
+      local phase
+      phase=$(kubectl get pods -n "$NS" -l "app=${db}-writer" --no-headers 2>/dev/null \
+              | awk '{print $3}' | head -1)
+      if [[ "$phase" == "Running" ]]; then
+        info "${db}-writer is Running"
+        break
+      fi
+      if (( $(date +%s) >= deadline )); then
+        warn "${db}-writer not Running after 5 minutes — proceeding anyway"
+        break
+      fi
+      printf "    %s-writer: %s — waiting...\r" "$db" "${phase:-Pending}"
+      sleep 5
+    done
+    echo ""
+  done
+
   step "Letting writers run for 2 minutes before backup"
   for i in $(seq 120 -10 10); do
     printf "  %3ds remaining...\r" "$i"
@@ -478,7 +500,7 @@ _run_backup_restore_check() {
 cmd_cycle() {
   div
   echo -e "${BOLD}  CYCLE TEST${NC}"
-  echo -e "  delete+restart writers → wait 2min → backup → wait 1min → restore all → check all"
+  echo -e "  delete+restart writers → wait 2min → backup → wait 1min → wipe sts+pvcs → restore → check"
   if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
     echo -e "  Mode: high-pressure (Python, batch=10, ~80-100 rows/sec, 50k rows)"
   else
@@ -494,7 +516,7 @@ cmd_cycle() {
 cmd_full() {
   div
   echo -e "${BOLD}  FULL E2E TEST${NC}"
-  echo -e "  deploy → wait 2min → backup → wait 1min → restore all → check all"
+  echo -e "  deploy → wait 2min → backup → wait 1min → wipe sts+pvcs → restore → check"
   div
 
   cmd_deploy
