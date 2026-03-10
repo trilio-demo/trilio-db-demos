@@ -38,22 +38,22 @@ data:
     " 2>/dev/null | tail -1 || echo "0")
     seq_num=$((LAST_SEQ + 1))
 
-    echo "📝 Writing ${STOP_AFTER_ROWS} documents from seq #${seq_num} at ${WRITE_INTERVAL}s/doc."
+    echo "📝 Writing ${STOP_AFTER_ROWS} docs from seq #${seq_num} in batches of ${BATCH_SIZE} at ${WRITE_INTERVAL}s/batch."
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     while [ "$seq_num" -le "$((LAST_SEQ + STOP_AFTER_ROWS))" ]; do
-      ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-      if $MONGOSH --eval "
-        db.writes_log.insertOne({
-          seq_num: ${seq_num},
-          written_at: new Date(),
-          note: 'trilio-demo-write-${seq_num}'
-        });
-      " > /dev/null 2>&1; then
-        printf "[%s]  Doc #%-6d  seq=%-8d  OK\n" "${ts}" "${seq_num}" "${seq_num}"
-        seq_num=$((seq_num + 1))
+      ts=$(date -u +"%H:%M:%S")
+      end=$((seq_num + BATCH_SIZE - 1))
+      [ "$end" -gt "$((LAST_SEQ + STOP_AFTER_ROWS))" ] && end=$((LAST_SEQ + STOP_AFTER_ROWS))
+      docs=""
+      for i in $(seq "$seq_num" "$end"); do
+        docs="${docs:+$docs,}{seq_num:${i},written_at:new Date(),note:'trilio-demo-write-${i}'}"
+      done
+      if $MONGOSH --eval "db.writes_log.insertMany([${docs}]);" > /dev/null 2>&1; then
+        printf "[%s]  Batch seq=%d–%d (%d docs)  OK\n" "${ts}" "${seq_num}" "${end}" "$((end - seq_num + 1))"
+        seq_num=$((end + 1))
       else
-        echo "[${ts}]  ERROR writing doc #${seq_num} — retrying in 3s..."
+        echo "[${ts}]  ERROR writing batch seq=${seq_num}–${end} — retrying in 3s..."
         sleep 3
         continue
       fi

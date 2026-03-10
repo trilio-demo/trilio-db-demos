@@ -134,9 +134,9 @@ data:
     B_GAP_MS=$(echo "$BROW" | cut -d'|' -f5 | tr -d ' ')
     if [ -n "$BROW" ] && [ "${B_GAP_MS:-0}" -gt 60000 ]; then
       B_LAST_SEQ=$(echo "$BROW"  | cut -d'|' -f1 | tr -d ' ')
-      B_LAST_TS=$(echo  "$BROW"  | cut -d'|' -f2 | tr -d ' ')
+      B_LAST_TS=$(echo  "$BROW"  | cut -d'|' -f2)
       B_FIRST_SEQ=$(echo "$BROW" | cut -d'|' -f3 | tr -d ' ')
-      B_FIRST_TS=$(echo  "$BROW" | cut -d'|' -f4 | tr -d ' ')
+      B_FIRST_TS=$(echo  "$BROW" | cut -d'|' -f4)
       B_GAP_S=$((B_GAP_MS / 1000))
       echo "   Last row before restore : seq=${B_LAST_SEQ}  @  ${B_LAST_TS} UTC"
       echo "   First row after restore : seq=${B_FIRST_SEQ}  @  ${B_FIRST_TS} UTC"

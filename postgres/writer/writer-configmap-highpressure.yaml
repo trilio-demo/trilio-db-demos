@@ -9,8 +9,9 @@ data:
 
     DB_HOST="${DB_HOST:-postgres-service}"
     DB_PORT="${DB_PORT:-5432}"
-    WRITE_INTERVAL="${WRITE_INTERVAL:-0.1}"    # seconds between writes
+    WRITE_INTERVAL="${WRITE_INTERVAL:-0.1}"    # seconds between batch writes
     STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-50000}"
+    BATCH_SIZE="${BATCH_SIZE:-10}"               # rows per INSERT call
 
     export PGPASSWORD="${POSTGRES_PASSWORD}"
     PSQL="psql -h ${DB_HOST} -p ${DB_PORT} -U ${POSTGRES_USER} -d ${POSTGRES_DB} -t -A"
@@ -20,7 +21,7 @@ data:
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  Host      : ${DB_HOST}:${DB_PORT}"
     echo "  Database  : ${POSTGRES_DB}"
-    echo "  Interval  : ${WRITE_INTERVAL}s per row"
+    echo "  Interval  : ${WRITE_INTERVAL}s per batch of ${BATCH_SIZE}"
     echo "  Target    : ${STOP_AFTER_ROWS} rows then exit"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
@@ -47,16 +48,22 @@ data:
     LAST_SEQ=$($PSQL -c "SELECT COALESCE(MAX(seq_num), 0) FROM writes_log;" 2>/dev/null || echo "0")
     seq_num=$((LAST_SEQ + 1))
 
-    echo "📝 Writing ${STOP_AFTER_ROWS} rows from seq #${seq_num} at ${WRITE_INTERVAL}s/row."
+    echo "📝 Writing ${STOP_AFTER_ROWS} rows from seq #${seq_num} in batches of ${BATCH_SIZE} at ${WRITE_INTERVAL}s/batch."
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     while [ "$seq_num" -le "$((LAST_SEQ + STOP_AFTER_ROWS))" ]; do
-      ts=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-      if $PSQL -c "INSERT INTO writes_log (seq_num, note) VALUES (${seq_num}, 'trilio-demo-write-${seq_num}');" > /dev/null 2>&1; then
-        printf "[%s]  Row #%-6d  seq=%-8d  OK\n" "${ts}" "${seq_num}" "${seq_num}"
-        seq_num=$((seq_num + 1))
+      ts=$(date -u +"%H:%M:%S")
+      end=$((seq_num + BATCH_SIZE - 1))
+      [ "$end" -gt "$((LAST_SEQ + STOP_AFTER_ROWS))" ] && end=$((LAST_SEQ + STOP_AFTER_ROWS))
+      vals=""
+      for i in $(seq "$seq_num" "$end"); do
+        vals="${vals:+$vals,}(${i},'trilio-demo-write-${i}')"
+      done
+      if $PSQL -c "INSERT INTO writes_log (seq_num, note) VALUES ${vals};" > /dev/null 2>&1; then
+        printf "[%s]  Batch seq=%d–%d (%d rows)  OK\n" "${ts}" "${seq_num}" "${end}" "$((end - seq_num + 1))"
+        seq_num=$((end + 1))
       else
-        echo "[${ts}]  ERROR writing row #${seq_num} — retrying in 3s..."
+        echo "[${ts}]  ERROR writing batch seq=${seq_num}–${end} — retrying in 3s..."
         sleep 3
         continue
       fi

@@ -111,7 +111,8 @@ data:
         print('   ──────────  ────────────────────  ──────────');
         stalls.forEach(s => {
           const ts = s.written_at.toISOString().replace('T',' ').substring(0,23);
-          print('   ' + String(s.seq_num).padEnd(10) + '  ' + ts.padEnd(20) + '  ' + Math.round(s.interval_ms) + 'ms  ← fsyncLock');
+          const label = s.interval_ms > 60000 ? '← restore window' : '← fsyncLock';
+          print('   ' + String(s.seq_num).padEnd(10) + '  ' + ts.padEnd(20) + '  ' + Math.round(s.interval_ms) + 'ms  ' + label);
         });
       }
       print('');
@@ -195,7 +196,10 @@ data:
       const vResult = db.writes_log.validate({ full: true });
       if (vResult.valid) {
         print('   ✅ validate() passed — no WiredTiger corruption detected');
-        print('   ℹ️  Errors: ' + vResult.errors.length + '  Warnings: ' + vResult.warnings.length);
+        if (vResult.warnings.length > 0) {
+          print('   ⚠️  Warnings (' + vResult.warnings.length + '):');
+          vResult.warnings.forEach(w => print('      ' + w));
+        }
       } else {
         print('   ❌ validate() FAILED:');
         vResult.errors.forEach(e => print('      ' + e));
