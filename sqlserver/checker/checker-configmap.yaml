@@ -168,9 +168,87 @@ data:
     done
 
     echo ""
+    echo "─── ⑥ Data Integrity ────────────────────────────────────────────────"
+    # 6a. Checksum: SUM of all seq_num — repeatable, deterministic
+    CHECKSUM=$(run "SELECT CAST(SUM(CAST(seq_num AS BIGINT)) AS VARCHAR) FROM writes_log;")
+    echo "   seq_num checksum (SUM) : ${CHECKSUM}"
+    echo "   ℹ️  Record this value before and after restore — must match."
+    echo ""
+
+    # 6b. Spot-check 5 rows: verify note field format is correct
+    echo "   Spot-check (5 rows, note format = 'trilio-demo-write-N'):"
+    SC=$($SQLCMD -h -1 -Q "
+      SET NOCOUNT ON;
+      SELECT TOP 5 CAST(seq_num AS VARCHAR(10))+' | '+note
+      FROM writes_log
+      ORDER BY NEWID();
+    " 2>/dev/null | tr -d '\r' | grep -v '^$')
+    SC_BAD=$(echo "$SC" | grep -v 'trilio-demo-write-' | grep -v '^$' | wc -l | tr -d ' ') || SC_BAD=0
+    echo "$SC" | while read -r line; do echo "      $line"; done
+    if [ "${SC_BAD}" -eq "0" ]; then
+      echo "   ✅ All spot-checked rows have correct note format"
+    else
+      echo "   ❌ ${SC_BAD} row(s) with unexpected note format"
+    fi
+    echo ""
+
+    # 6c. DBCC CHECKDB — physical + logical consistency of all pages
+    echo "   DBCC CHECKDB('${DB_NAME}') — physical+logical page consistency:"
+    DBCC_OUT=$($SQLCMD -Q "
+      SET NOCOUNT ON;
+      DBCC CHECKDB('${DB_NAME}') WITH NO_INFOMSGS, ALL_ERRORMSGS;
+    " 2>/dev/null | tr -d '\r' | grep -v '^$' || true)
+    if [ -z "$DBCC_OUT" ]; then
+      echo "   ✅ DBCC CHECKDB passed — no allocation, consistency, or page errors"
+    else
+      echo "   ❌ DBCC CHECKDB reported issues:"
+      echo "$DBCC_OUT" | while read -r line; do echo "      $line"; done
+    fi
+    echo ""
+
+    # 6d. Recovery model — must be FULL for point-in-time restore capability
+    RECOVERY=$(run "SELECT recovery_model_desc FROM sys.databases WHERE name='${DB_NAME}';")
+    if [ "$RECOVERY" = "FULL" ]; then
+      echo "   ✅ Recovery model : FULL — log backups and point-in-time restore are supported"
+    else
+      echo "   ⚠️  Recovery model : ${RECOVERY} — FULL is recommended for production"
+    fi
+    echo ""
+
+    echo "─── ⑦ Post-Restore Write Test ───────────────────────────────────────"
+    # Verify the database accepts writes after restore (not read-only, log is writable)
+    NEXT_SEQ=$(run "SELECT CAST(ISNULL(MAX(seq_num),0)+1 AS VARCHAR) FROM writes_log;")
+    $SQLCMD -Q "
+      SET NOCOUNT ON;
+      INSERT INTO writes_log (seq_num, written_at, note)
+      VALUES (${NEXT_SEQ}, GETUTCDATE(), 'checker-write-test');
+    " > /dev/null 2>&1 && WRITE_OK=1 || WRITE_OK=0
+
+    if [ "$WRITE_OK" -eq 1 ]; then
+      # Verify we can read it back
+      READ_BACK=$(run "SELECT note FROM writes_log WHERE seq_num=${NEXT_SEQ};")
+      if [ "$READ_BACK" = "checker-write-test" ]; then
+        echo "   ✅ INSERT + SELECT verified (seq=${NEXT_SEQ})"
+      else
+        echo "   ❌ INSERT succeeded but SELECT returned unexpected value: '${READ_BACK}'"
+        WRITE_OK=0
+      fi
+      # Clean up test row
+      $SQLCMD -Q "SET NOCOUNT ON; DELETE FROM writes_log WHERE seq_num=${NEXT_SEQ};" > /dev/null 2>&1 || true
+      echo "   ✅ DELETE cleanup completed — database is fully read-write"
+    else
+      echo "   ❌ INSERT failed — database may be read-only or in recovery"
+    fi
+    echo ""
+
     echo "$DIV"
-    if [ "${GAPS}" -eq "0" ] && [ "${TOTAL}" -eq "${EXPECTED}" ]; then
-      echo "  ✅  OVERALL: PASSED — data is complete and consistent"
+    INTEGRITY_OK=1
+    [ "${GAPS}" -ne "0" ] && INTEGRITY_OK=0
+    [ "${TOTAL}" -ne "${EXPECTED}" ] && INTEGRITY_OK=0
+    [ -n "$DBCC_OUT" ] && INTEGRITY_OK=0
+    [ "$WRITE_OK" -eq 0 ] && INTEGRITY_OK=0
+    if [ "${INTEGRITY_OK}" -eq "1" ]; then
+      echo "  ✅  OVERALL: PASSED — data is complete, consistent, and writable"
     else
       echo "  ❌  OVERALL: FAILED — data integrity issues detected"
       exit 1

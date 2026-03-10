@@ -14,8 +14,9 @@ kubectl create namespace trilio-demo
 kubectl apply -f deploy/ -n trilio-demo
 kubectl rollout status statefulset/mariadb -n trilio-demo
 
-# STEP 2 — Start the continuous writer
-kubectl apply -f writer/ -n trilio-demo
+# STEP 2 — Start the continuous writer (standard: 1 row/sec, 10,000 rows)
+kubectl apply -f writer/writer-configmap.yaml -n trilio-demo
+kubectl apply -f writer/writer-job.yaml -n trilio-demo
 
 # Terminal 2 — confirm rows are being written (keep open during backup)
 kubectl logs -f job/mariadb-writer -n trilio-demo
@@ -51,6 +52,8 @@ kubectl delete job mariadb-consistency-checker -n trilio-demo --ignore-not-found
 kubectl apply -f checker/ -n trilio-demo
 kubectl logs -f job/mariadb-consistency-checker -n trilio-demo
 ```
+
+> **Automated path:** `test.sh` at the repo root runs the full deploy → backup → restore → check workflow for all 4 databases with a single command. See [shared/README.md](../shared/README.md).
 
 ---
 

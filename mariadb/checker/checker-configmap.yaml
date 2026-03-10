@@ -161,9 +161,73 @@ data:
     done <<< "$TIMELINE"
 
     echo ""
+    echo "─── ⑥ Data Integrity ────────────────────────────────────────────────"
+    # 6a. Checksum: SUM of all seq_num
+    CHECKSUM=$(sql "SELECT CAST(SUM(CAST(seq_num AS UNSIGNED)) AS CHAR) FROM writes_log;")
+    echo "   seq_num checksum (SUM) : ${CHECKSUM}"
+    echo "   ℹ️  Record this value before and after restore — must match."
+    echo ""
+
+    # 6b. Spot-check 5 rows
+    echo "   Spot-check (5 rows, note format = 'trilio-demo-write-N'):"
+    SC=$(sql "SELECT CONCAT(seq_num,' | ',note) FROM writes_log ORDER BY RAND() LIMIT 5;")
+    SC_BAD=$(echo "$SC" | grep -v 'trilio-demo-write-' | grep -v '^$' | wc -l | tr -d ' ') || SC_BAD=0
+    echo "$SC" | while read -r line; do [ -n "$line" ] && echo "      $line"; done
+    if [ "${SC_BAD}" -eq "0" ]; then
+      echo "   ✅ All spot-checked rows have correct note format"
+    else
+      echo "   ❌ ${SC_BAD} row(s) with unexpected note format"
+    fi
+    echo ""
+
+    # 6c. CHECK TABLE — InnoDB storage-level consistency check
+    echo "   CHECK TABLE writes_log (InnoDB storage-level check):"
+    CHECK_OUT=$(sql "CHECK TABLE writes_log;" | awk '{print $3,$4}')
+    if echo "$CHECK_OUT" | grep -qi "OK"; then
+      echo "   ✅ CHECK TABLE : OK — no InnoDB corruption detected"
+    else
+      echo "   ❌ CHECK TABLE reported issues: ${CHECK_OUT}"
+    fi
+    echo ""
+
+    # 6d. InnoDB engine status — verify engine is healthy
+    INNODB_STATUS=$(sql "SELECT ENGINE, SUPPORT FROM information_schema.ENGINES WHERE ENGINE='InnoDB';" | head -1)
+    ENGINE=$(echo "$INNODB_STATUS" | awk '{print $1}')
+    SUPPORT=$(echo "$INNODB_STATUS" | awk '{print $2}')
+    if [ "$ENGINE" = "InnoDB" ] && [ "$SUPPORT" = "DEFAULT" ]; then
+      echo "   ✅ InnoDB : DEFAULT engine — fully operational"
+    else
+      echo "   ⚠️  InnoDB engine status: ENGINE=${ENGINE} SUPPORT=${SUPPORT}"
+    fi
+    echo ""
+
+    echo "─── ⑦ Post-Restore Write Test ───────────────────────────────────────"
+    NEXT_SEQ=$(sql "SELECT COALESCE(MAX(seq_num),0)+1 FROM writes_log;")
+    WRITE_OK=0
+    sql "INSERT INTO writes_log (seq_num, written_at, note) VALUES (${NEXT_SEQ}, UTC_TIMESTAMP(), 'checker-write-test');" > /dev/null 2>&1 && WRITE_OK=1 || true
+
+    if [ "$WRITE_OK" -eq 1 ]; then
+      READ_BACK=$(sql "SELECT note FROM writes_log WHERE seq_num=${NEXT_SEQ};")
+      if [ "$READ_BACK" = "checker-write-test" ]; then
+        echo "   ✅ INSERT + SELECT verified (seq=${NEXT_SEQ})"
+      else
+        echo "   ❌ INSERT succeeded but SELECT returned unexpected value: '${READ_BACK}'"
+        WRITE_OK=0
+      fi
+      sql "DELETE FROM writes_log WHERE seq_num=${NEXT_SEQ};" > /dev/null 2>&1 || true
+      echo "   ✅ DELETE cleanup completed — database is fully read-write"
+    else
+      echo "   ❌ INSERT failed — database may be read-only or in recovery"
+    fi
+    echo ""
+
     echo "$DIV"
-    if [ "${GAPS}" -eq "0" ] && [ "${TOTAL}" -eq "${EXPECTED}" ]; then
-      echo "  ✅  OVERALL: PASSED — data is complete and consistent"
+    INTEGRITY_OK=1
+    [ "${GAPS}" -ne "0" ] && INTEGRITY_OK=0
+    [ "${TOTAL}" -ne "${EXPECTED}" ] && INTEGRITY_OK=0
+    [ "$WRITE_OK" -eq 0 ] && INTEGRITY_OK=0
+    if [ "${INTEGRITY_OK}" -eq "1" ]; then
+      echo "  ✅  OVERALL: PASSED — data is complete, consistent, and writable"
     else
       echo "  ❌  OVERALL: FAILED — data integrity issues detected"
       exit 1

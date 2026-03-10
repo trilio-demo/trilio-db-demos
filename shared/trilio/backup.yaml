@@ -1,0 +1,12 @@
+apiVersion: triliovault.trilio.io/v1
+kind: Backup
+metadata:
+  name: all-dbs-backup
+  namespace: trilio-demo
+spec:
+  backupPlan:
+    name: all-dbs-backupplan
+  type: Full
+  # Apply while all 4 writers are running.
+  # Watch progress:
+  #   kubectl get backup all-dbs-backup -n trilio-demo -w
