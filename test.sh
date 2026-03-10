@@ -19,7 +19,7 @@
 #    ./test.sh full                deploy → backup → restore all → check all (E2E)
 #    ./test.sh full --high-pressure
 #                                  Full E2E test with high-pressure writers
-#    ./test.sh cycle               restart writers → backup → restore all → check all (skip deploy)
+#    ./test.sh cycle               delete+restart writers → backup → restore all → check all (skip deploy)
 #    ./test.sh cycle --high-pressure
 #                                  Same but with high-pressure writers
 #
@@ -476,7 +476,7 @@ _run_backup_restore_check() {
 cmd_cycle() {
   div
   echo -e "${BOLD}  CYCLE TEST${NC}"
-  echo -e "  restart writers → wait 2min → backup → wait 1min → restore all → check all"
+  echo -e "  delete+restart writers → wait 2min → backup → wait 1min → restore all → check all"
   if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
     echo -e "  Mode: high-pressure (0.1s/row, 50k rows)"
   else
