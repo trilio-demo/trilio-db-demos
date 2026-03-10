@@ -184,11 +184,11 @@ cmd_deploy() {
     kubectl apply -f "$SCRIPT_DIR/sqlserver/deploy/00a-serviceaccount.yaml" -n "$NS" > /dev/null 2>&1
     if kubectl apply -f "$SCRIPT_DIR/sqlserver/deploy/00b-scc-rolebinding.yaml" -n "$NS" > /dev/null 2>&1; then
       pass "anyuid SCC RoleBinding applied for sqlserver ServiceAccount"
-    elif oc adm policy add-scc-to-serviceaccount anyuid -z sqlserver -n "$NS" > /dev/null 2>&1; then
+    elif oc adm policy add-scc-to-serviceaccount anyuid sqlserver -n "$NS" > /dev/null 2>&1; then
       pass "anyuid SCC granted via oc adm policy"
     else
       warn "Could not grant anyuid SCC — if SQL Server fails, run manually:"
-      warn "  oc adm policy add-scc-to-serviceaccount anyuid -z sqlserver -n $NS"
+      warn "  oc adm policy add-scc-to-serviceaccount anyuid sqlserver -n $NS"
     fi
   fi
 
