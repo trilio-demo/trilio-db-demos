@@ -308,7 +308,8 @@ cmd_restore() {
   local latest_backup
   latest_backup=$(kubectl get backup -n "$NS" \
     --sort-by='.metadata.creationTimestamp' \
-    -o jsonpath='{.items[-1].metadata.name}' 2>/dev/null)
+    --no-headers \
+    -o custom-columns=NAME:.metadata.name 2>/dev/null | tail -1 || true)
   if [[ -z "$latest_backup" ]]; then
     die "No backup found in namespace $NS — run './test.sh backup' first"
   fi
