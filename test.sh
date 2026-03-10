@@ -85,6 +85,17 @@ kapply() {
   fi
 }
 
+# Apply a manifest and prefix output with the DB name
+kapply_db() {
+  local db="$1" file="$2"
+  if kubectl apply -f "$file" -n "$NS" > /dev/null 2>&1; then
+    pass "[${db}] $(basename $file)"
+  else
+    fail "[${db}] $(basename $file) — FAILED"
+    kubectl apply -f "$file" -n "$NS" 2>&1 | sed 's/^/    /'
+  fi
+}
+
 # Wait for a StatefulSet to have all pods ready
 wait_sts_ready() {
   local name="$1" timeout="$TIMEOUT_READY" elapsed=0
@@ -212,17 +223,17 @@ cmd_deploy() {
     # Delete existing writer job if present (jobs are immutable)
     kubectl delete job "${db}-writer" -n "$NS" --ignore-not-found > /dev/null 2>&1
     if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
-      kapply "$dir/writer/writer-configmap-highpressure.yaml"
-      kapply "$dir/writer/writer-job-highpressure.yaml"
+      kapply_db "$db" "$dir/writer/writer-configmap-highpressure.yaml"
+      kapply_db "$db" "$dir/writer/writer-job-highpressure.yaml"
     else
-      kapply "$dir/writer/writer-configmap.yaml"
-      kapply "$dir/writer/writer-job.yaml"
+      kapply_db "$db" "$dir/writer/writer-configmap.yaml"
+      kapply_db "$db" "$dir/writer/writer-job.yaml"
     fi
   done
 
   step "Deploying Trilio hooks"
   for db in "${DBS[@]}"; do
-    kapply "$SCRIPT_DIR/$db/trilio/hook.yaml"
+    kapply_db "$db" "$SCRIPT_DIR/$db/trilio/hook.yaml"
   done
 
   step "Deploying combined BackupPlan"
@@ -321,8 +332,8 @@ cmd_check() {
     # Delete completed/failed checker jobs
     kubectl delete job "${db}-consistency-checker" -n "$NS" --ignore-not-found > /dev/null 2>&1
     sleep 1
-    kapply "$dir/checker-configmap.yaml"
-    kapply "$dir/consistency-checker-job.yaml"
+    kapply_db "$db" "$dir/checker-configmap.yaml"
+    kapply_db "$db" "$dir/consistency-checker-job.yaml"
   done
 
   step "Waiting for checkers to complete"
@@ -443,11 +454,11 @@ _run_writers() {
     local dir="$SCRIPT_DIR/$db"
     kubectl delete job "${db}-writer" -n "$NS" --ignore-not-found > /dev/null 2>&1
     if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
-      kapply "$dir/writer/writer-configmap-highpressure.yaml"
-      kapply "$dir/writer/writer-job-highpressure.yaml"
+      kapply_db "$db" "$dir/writer/writer-configmap-highpressure.yaml"
+      kapply_db "$db" "$dir/writer/writer-job-highpressure.yaml"
     else
-      kapply "$dir/writer/writer-configmap.yaml"
-      kapply "$dir/writer/writer-job.yaml"
+      kapply_db "$db" "$dir/writer/writer-configmap.yaml"
+      kapply_db "$db" "$dir/writer/writer-job.yaml"
     fi
     info "↺  ${db}-writer started"
   done
