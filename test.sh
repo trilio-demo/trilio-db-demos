@@ -306,7 +306,7 @@ cmd_restore() {
   step "Triggering restore"
   # Always restore from the latest available backup
   local latest_backup
-  latest_backup=$(kubectl get backup -n "$NS" \
+  latest_backup=$(kubectl get backups.triliovault.trilio.io -n "$NS" \
     --sort-by='.metadata.creationTimestamp' \
     --no-headers \
     -o custom-columns=NAME:.metadata.name 2>/dev/null | tail -1 || true)
