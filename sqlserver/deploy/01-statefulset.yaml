@@ -17,7 +17,8 @@ spec:
         app: sqlserver
         demo: trilio-db-demo
     spec:
-      # SQL Server requires specific security context
+      serviceAccountName: sqlserver
+      # SQL Server runs as uid 10001 (mssql) — requires anyuid SCC on OpenShift
       securityContext:
         fsGroup: 10001
       containers:
