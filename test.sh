@@ -19,6 +19,9 @@
 #    ./test.sh full                deploy → backup → restore all → check all (E2E)
 #    ./test.sh full --high-pressure
 #                                  Full E2E test with high-pressure writers
+#    ./test.sh cycle               restart writers → backup → restore all → check all (skip deploy)
+#    ./test.sh cycle --high-pressure
+#                                  Same but with high-pressure writers
 #
 #  Environment overrides:
 #    NAMESPACE      (default: trilio-demo)
@@ -433,14 +436,23 @@ cmd_nuke() {
   fi
 }
 
-cmd_full() {
-  div
-  echo -e "${BOLD}  FULL E2E TEST${NC}"
-  echo -e "  deploy → wait 2min → backup → wait 1min → restore all → check all"
-  div
+_run_writers() {
+  # Apply configmaps + (re)start writer jobs. Respects HIGH_PRESSURE flag.
+  for db in "${DBS[@]}"; do
+    local dir="$SCRIPT_DIR/$db"
+    if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
+      kapply "$dir/writer/writer-configmap-highpressure.yaml"
+    else
+      kapply "$dir/writer/writer-configmap.yaml"
+    fi
+    kubectl delete job "${db}-writer" -n "$NS" --ignore-not-found > /dev/null 2>&1
+    kapply "$dir/writer/writer-job.yaml"
+    info "↺  ${db}-writer started"
+  done
+}
 
-  cmd_deploy
-
+_run_backup_restore_check() {
+  # Shared tail: wait → backup → wait → restore → check
   step "Letting writers run for 2 minutes before backup"
   for i in $(seq 120 -10 10); do
     printf "  %3ds remaining...\r" "$i"
@@ -459,6 +471,32 @@ cmd_full() {
 
   cmd_restore "all"
   cmd_check "all"
+}
+
+cmd_cycle() {
+  div
+  echo -e "${BOLD}  CYCLE TEST${NC}"
+  echo -e "  restart writers → wait 2min → backup → wait 1min → restore all → check all"
+  if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
+    echo -e "  Mode: high-pressure (0.1s/row, 50k rows)"
+  else
+    echo -e "  Mode: standard (1s/row, 10k rows)"
+  fi
+  div
+
+  step "Restarting writers"
+  _run_writers
+  _run_backup_restore_check
+}
+
+cmd_full() {
+  div
+  echo -e "${BOLD}  FULL E2E TEST${NC}"
+  echo -e "  deploy → wait 2min → backup → wait 1min → restore all → check all"
+  div
+
+  cmd_deploy
+  _run_backup_restore_check
 }
 
 # ── Internal: delete one DB's workload resources ──────────────────────────────
@@ -529,6 +567,7 @@ case "$CMD" in
   cleanup)  cmd_cleanup "$ARG2" ;;
   nuke)     cmd_nuke ;;
   full)     cmd_full ;;
+  cycle)    cmd_cycle ;;
   help|--help|-h)
     sed -n '/^#  Usage:/,/^# ━/p' "$0" | head -25
     ;;
