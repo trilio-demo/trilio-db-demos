@@ -55,35 +55,8 @@ data:
     fi
     echo ""
 
-    # ── ③ Write Latency Stats ─────────────────────────────────────────────────
-    echo "─── ② Write Latency (inter-row intervals) ───────────────────────────"
-    LATENCY=$($PSQL -c "
-      WITH intervals AS (
-        SELECT
-          EXTRACT(EPOCH FROM (written_at - LAG(written_at) OVER (ORDER BY seq_num))) * 1000 AS ms
-        FROM writes_log
-      )
-      SELECT
-        ROUND(percentile_cont(0.50) WITHIN GROUP (ORDER BY ms)::numeric, 0),
-        ROUND(percentile_cont(0.95) WITHIN GROUP (ORDER BY ms)::numeric, 0),
-        ROUND(percentile_cont(0.99) WITHIN GROUP (ORDER BY ms)::numeric, 0),
-        ROUND(MAX(ms)::numeric, 0)
-      FROM intervals WHERE ms IS NOT NULL;
-    ")
-    P50=$(echo "$LATENCY" | cut -d'|' -f1 | tr -d ' ')
-    P95=$(echo "$LATENCY" | cut -d'|' -f2 | tr -d ' ')
-    P99=$(echo "$LATENCY" | cut -d'|' -f3 | tr -d ' ')
-    MAX=$(echo "$LATENCY" | cut -d'|' -f4 | tr -d ' ')
-
-    echo "   Expected interval : ~1000ms  (1 row/sec)"
-    echo "   p50               : ${P50}ms"
-    echo "   p95               : ${P95}ms"
-    echo "   p99               : ${P99}ms"
-    echo "   max               : ${MAX}ms  (large value after restore = gap between backup and writer resuming — expected)"
-    echo ""
-
-    # ── ④ Stall Detection ─────────────────────────────────────────────────────
-    echo "─── ③ Write Stalls (interval > 2× expected = >2000ms) ───────────────"
+    # ── ③ Stall Detection ─────────────────────────────────────────────────────
+    echo "─── ② Write Stalls (interval > 2× expected = >2000ms) ───────────────"
     STALLS=$($PSQL -c "
       WITH intervals AS (
         SELECT seq_num, written_at,
@@ -112,7 +85,7 @@ data:
     fi
     echo ""
 
-    echo "─── ④ Restore Boundary ──────────────────────────────────────────────"
+    echo "─── ③ Restore Boundary ──────────────────────────────────────────────"
     BROW=$($PSQL -c "
       WITH gaps AS (
         SELECT seq_num, written_at,
@@ -147,7 +120,7 @@ data:
     fi
     echo ""
 
-    echo "─── ⑤ Write Rate Timeline (rows per 10-second bucket) ───────────────"
+    echo "─── ④ Write Rate Timeline (rows per 10-second bucket) ───────────────"
     echo "   (a dip here during the backup window shows hook/snapshot impact)"
     echo ""
     TIMELINE=$($PSQL -c "
@@ -171,7 +144,7 @@ data:
     done <<< "$TIMELINE"
 
     echo ""
-    echo "─── ⑥ Data Integrity ────────────────────────────────────────────────"
+    echo "─── ⑤ Data Integrity ────────────────────────────────────────────────"
     # 6a. Checksum: SUM of all seq_num — deterministic, reproducible
     CHECKSUM=$($PSQL -c "SELECT SUM(seq_num::bigint)::text FROM writes_log;")
     echo "   seq_num checksum (SUM) : ${CHECKSUM}"
@@ -215,7 +188,7 @@ data:
     fi
     echo ""
 
-    echo "─── ⑦ Post-Restore Write Test ───────────────────────────────────────"
+    echo "─── ⑥ Post-Restore Write Test ───────────────────────────────────────"
     NEXT_SEQ=$($PSQL -c "SELECT COALESCE(MAX(seq_num),0)+1 FROM writes_log;")
     WRITE_OK=0
     $PSQL -c "INSERT INTO writes_log (seq_num, written_at, note) VALUES (${NEXT_SEQ}, NOW(), 'checker-write-test');" > /dev/null 2>&1 && WRITE_OK=1 || true

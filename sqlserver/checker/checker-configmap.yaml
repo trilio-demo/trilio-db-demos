@@ -51,35 +51,7 @@ data:
     fi
     echo ""
 
-    echo "─── ② Write Latency (inter-row intervals) ───────────────────────────"
-    LATENCY=$($SQLCMD -h -1 -Q "
-      SET NOCOUNT ON;
-      WITH intervals AS (
-        SELECT DATEDIFF(MILLISECOND,
-          LAG(written_at) OVER (ORDER BY seq_num), written_at) AS ms
-        FROM writes_log
-      )
-      SELECT TOP 1
-        CAST(ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY ms) OVER (),0) AS BIGINT),
-        CAST(ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ms) OVER (),0) AS BIGINT),
-        CAST(ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY ms) OVER (),0) AS BIGINT),
-        MAX(ms) OVER ()
-      FROM intervals WHERE ms IS NOT NULL;
-    " 2>/dev/null | tr -d '\r' | grep -v '^$' | head -1)
-
-    P50=$(echo "$LATENCY" | awk '{print $1}')
-    P95=$(echo "$LATENCY" | awk '{print $2}')
-    P99=$(echo "$LATENCY" | awk '{print $3}')
-    MAX=$(echo "$LATENCY" | awk '{print $4}')
-
-    echo "   Expected interval : ~1000ms  (1 row/sec)"
-    echo "   p50               : ${P50}ms"
-    echo "   p95               : ${P95}ms"
-    echo "   p99               : ${P99}ms"
-    echo "   max               : ${MAX}ms  (large value after restore = gap between backup and writer resuming — expected)"
-    echo ""
-
-    echo "─── ③ Write Stalls (interval > 2× expected = >2000ms) ───────────────"
+    echo "─── ② Write Stalls (interval > 2× expected = >2000ms) ───────────────"
     STALLS=$($SQLCMD -h -1 -Q "
       SET NOCOUNT ON;
       WITH intervals AS (
@@ -108,7 +80,7 @@ data:
     fi
     echo ""
 
-    echo "─── ④ Restore Boundary ──────────────────────────────────────────────"
+    echo "─── ③ Restore Boundary ──────────────────────────────────────────────"
     BROW=$($SQLCMD -h -1 -Q "
       SET NOCOUNT ON;
       WITH gaps AS (
@@ -144,7 +116,7 @@ data:
     fi
     echo ""
 
-    echo "─── ⑤ Write Rate Timeline (rows per 10-second bucket) ───────────────"
+    echo "─── ④ Write Rate Timeline (rows per 10-second bucket) ───────────────"
     TIMELINE=$($SQLCMD -h -1 -Q "
       SET NOCOUNT ON;
       SELECT
@@ -168,7 +140,7 @@ data:
     done
 
     echo ""
-    echo "─── ⑥ Data Integrity ────────────────────────────────────────────────"
+    echo "─── ⑤ Data Integrity ────────────────────────────────────────────────"
     # 6a. Checksum: SUM of all seq_num — repeatable, deterministic
     CHECKSUM=$(run "SELECT CAST(SUM(CAST(seq_num AS BIGINT)) AS VARCHAR) FROM writes_log;")
     echo "   seq_num checksum (SUM) : ${CHECKSUM}"
@@ -215,7 +187,7 @@ data:
     fi
     echo ""
 
-    echo "─── ⑦ Post-Restore Write Test ───────────────────────────────────────"
+    echo "─── ⑥ Post-Restore Write Test ───────────────────────────────────────"
     # Verify the database accepts writes after restore (not read-only, log is writable)
     NEXT_SEQ=$(run "SELECT CAST(ISNULL(MAX(seq_num),0)+1 AS VARCHAR) FROM writes_log;")
     $SQLCMD -Q "

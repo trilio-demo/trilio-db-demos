@@ -63,34 +63,8 @@ data:
       }
       print('');
 
-      // ── ② Write Latency ───────────────────────────────────────────────────
-      print('─── ② Write Latency (inter-doc intervals) ───────────────────────────');
-      const latResult = db.writes_log.aggregate([
-        { \$sort: { seq_num: 1 } },
-        { \$setWindowFields: { sortBy: { seq_num: 1 },
-            output: { prevTs: { \$shift: { output: '\$written_at', by: -1 } } } } },
-        { \$match: { prevTs: { \$ne: null } } },
-        { \$addFields: { interval_ms: { \$subtract: ['\$written_at', '\$prevTs'] } } },
-        { \$group: { _id: null,
-            p50: { \$percentile: { input: '\$interval_ms', p: [0.50], method: 'approximate' } },
-            p95: { \$percentile: { input: '\$interval_ms', p: [0.95], method: 'approximate' } },
-            p99: { \$percentile: { input: '\$interval_ms', p: [0.99], method: 'approximate' } },
-            max: { \$max: '\$interval_ms' }
-        }}
-      ]).toArray();
-
-      if (latResult.length > 0) {
-        const l = latResult[0];
-        print('   Expected interval : ~1000ms  (1 doc/sec)');
-        print('   p50               : ' + Math.round(l.p50[0]) + 'ms');
-        print('   p95               : ' + Math.round(l.p95[0]) + 'ms');
-        print('   p99               : ' + Math.round(l.p99[0]) + 'ms');
-        print('   max               : ' + Math.round(l.max) + 'ms');
-      }
-      print('');
-
-      // ── ③ Stall Detection ─────────────────────────────────────────────────
-      print('─── ③ Write Stalls (interval > 2× expected = >2000ms) ───────────────');
+      // ── ② Stall Detection ─────────────────────────────────────────────────
+      print('─── ② Write Stalls (interval > 2× expected = >2000ms) ───────────────');
       print('   NOTE: A pause during the backup window is expected — it means the');
       print('   fsyncLock write lock was held during the snapshot (correct behavior).');
       const stalls = db.writes_log.aggregate([
@@ -118,7 +92,7 @@ data:
       print('');
 
       // ── ④ Restore Boundary ───────────────────────────────────────────────
-      print('─── ④ Restore Boundary ──────────────────────────────────────────────');
+      print('─── ③ Restore Boundary ──────────────────────────────────────────────');
       const boundaryResult = db.writes_log.aggregate([
         { \$sort: { seq_num: 1 } },
         { \$setWindowFields: { sortBy: { seq_num: 1 },
@@ -147,7 +121,7 @@ data:
       print('');
 
       // ── ⑤ Timeline ────────────────────────────────────────────────────────
-      print('─── ⑤ Write Rate Timeline (docs per 10-second bucket) ───────────────');
+      print('─── ④ Write Rate Timeline (docs per 10-second bucket) ───────────────');
       const timeline = db.writes_log.aggregate([
         { \$addFields: { bucket: { \$dateTrunc: { date: '\$written_at', unit: 'second',
               binSize: 10 } } } },
@@ -164,7 +138,7 @@ data:
       print('');
 
       // ── ⑥ Data Integrity ─────────────────────────────────────────────────
-      print('─── ⑥ Data Integrity ────────────────────────────────────────────────');
+      print('─── ⑤ Data Integrity ────────────────────────────────────────────────');
 
       // 6a. Checksum: SUM of all seq_num
       const sumResult = db.writes_log.aggregate([
@@ -214,7 +188,7 @@ data:
       print('');
 
       // ── ⑦ Post-Restore Write Test ─────────────────────────────────────────
-      print('─── ⑦ Post-Restore Write Test ───────────────────────────────────────');
+      print('─── ⑥ Post-Restore Write Test ───────────────────────────────────────');
       const nextSeq = db.writes_log.find().sort({ seq_num: -1 }).limit(1).toArray()[0]?.seq_num + 1 || 1;
       let writeOk = false;
       try {

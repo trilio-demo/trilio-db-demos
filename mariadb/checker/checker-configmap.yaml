@@ -50,39 +50,7 @@ data:
     fi
     echo ""
 
-    echo "─── ② Write Latency (inter-row intervals) ───────────────────────────"
-    # MariaDB: PERCENTILE_CONT is a window function (requires OVER()).
-    # Use MIN() in the outer query to collapse window results to one row.
-    LATENCY=$(sql "
-      WITH intervals AS (
-        SELECT TIMESTAMPDIFF(MICROSECOND,
-          LAG(written_at) OVER (ORDER BY seq_num), written_at) / 1000 AS ms
-        FROM writes_log
-      ),
-      stats AS (
-        SELECT
-          PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY ms) OVER () AS p50,
-          PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY ms) OVER () AS p95,
-          PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY ms) OVER () AS p99,
-          MAX(ms) OVER () AS maxms
-        FROM intervals WHERE ms IS NOT NULL
-      )
-      SELECT ROUND(MIN(p50),0), ROUND(MIN(p95),0), ROUND(MIN(p99),0), ROUND(MIN(maxms),0)
-      FROM stats;
-    ")
-    P50=$(echo "$LATENCY" | cut -f1)
-    P95=$(echo "$LATENCY" | cut -f2)
-    P99=$(echo "$LATENCY" | cut -f3)
-    MAX=$(echo "$LATENCY" | cut -f4)
-
-    echo "   Expected interval : ~1000ms  (1 row/sec)"
-    echo "   p50               : ${P50}ms"
-    echo "   p95               : ${P95}ms"
-    echo "   p99               : ${P99}ms"
-    echo "   max               : ${MAX}ms  (large value after restore = gap between backup and writer resuming — expected)"
-    echo ""
-
-    echo "─── ③ Write Stalls (interval > 2× expected = >2000ms) ───────────────"
+    echo "─── ② Write Stalls (interval > 2× expected = >2000ms) ───────────────"
     STALLS=$(sql "
       WITH intervals AS (
         SELECT seq_num, written_at,
@@ -109,7 +77,7 @@ data:
     fi
     echo ""
 
-    echo "─── ④ Restore Boundary ──────────────────────────────────────────────"
+    echo "─── ③ Restore Boundary ──────────────────────────────────────────────"
     BROW=$(sql "
       WITH gaps AS (
         SELECT seq_num, written_at,
@@ -140,7 +108,7 @@ data:
     fi
     echo ""
 
-    echo "─── ⑤ Write Rate Timeline (rows per 10-second bucket) ───────────────"
+    echo "─── ④ Write Rate Timeline (rows per 10-second bucket) ───────────────"
     TIMELINE=$(sql "
       SELECT
         DATE_FORMAT(
@@ -161,7 +129,7 @@ data:
     done <<< "$TIMELINE"
 
     echo ""
-    echo "─── ⑥ Data Integrity ────────────────────────────────────────────────"
+    echo "─── ⑤ Data Integrity ────────────────────────────────────────────────"
     # 6a. Checksum: SUM of all seq_num
     CHECKSUM=$(sql "SELECT CAST(SUM(CAST(seq_num AS UNSIGNED)) AS CHAR) FROM writes_log;")
     echo "   seq_num checksum (SUM) : ${CHECKSUM}"
@@ -201,7 +169,7 @@ data:
     fi
     echo ""
 
-    echo "─── ⑦ Post-Restore Write Test ───────────────────────────────────────"
+    echo "─── ⑥ Post-Restore Write Test ───────────────────────────────────────"
     NEXT_SEQ=$(sql "SELECT COALESCE(MAX(seq_num),0)+1 FROM writes_log;")
     WRITE_OK=0
     sql "INSERT INTO writes_log (seq_num, written_at, note) VALUES (${NEXT_SEQ}, UTC_TIMESTAMP(), 'checker-write-test');" > /dev/null 2>&1 && WRITE_OK=1 || true
