@@ -173,6 +173,19 @@ cmd_deploy() {
   kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - > /dev/null 2>&1
   pass "Namespace $NS ready"
 
+  # OpenShift: SQL Server binary needs capabilities that restricted-v2 strips — anyuid SCC required.
+  # Must be done BEFORE the StatefulSet is created so the pod can start immediately.
+  if command -v oc &>/dev/null; then
+    step "OpenShift SCC (SQL Server requires anyuid)"
+    kubectl apply -f "$SCRIPT_DIR/sqlserver/deploy/00a-serviceaccount.yaml" -n "$NS" > /dev/null 2>&1
+    if oc adm policy add-scc-to-serviceaccount anyuid sqlserver -n "$NS" > /dev/null 2>&1; then
+      pass "anyuid SCC granted to sqlserver ServiceAccount"
+    else
+      warn "Could not grant anyuid SCC — SQL Server will fail. Run manually (requires cluster-admin):"
+      warn "  oc adm policy add-scc-to-serviceaccount anyuid sqlserver -n $NS"
+    fi
+  fi
+
   for db in "${DBS[@]}"; do
     step "Deploy: $db"
     local dir="$SCRIPT_DIR/$db"

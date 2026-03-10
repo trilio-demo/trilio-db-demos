@@ -17,7 +17,11 @@ spec:
         app: sqlserver
         demo: trilio-db-demo
     spec:
-      # SQL Server 2022 supports arbitrary UIDs — no fsGroup needed, works with restricted-v2 SCC
+      serviceAccountName: sqlserver
+      # SQL Server requires anyuid SCC on OpenShift (binary needs capabilities restricted-v2 strips).
+      # test.sh grants this automatically. Manual: oc adm policy add-scc-to-serviceaccount anyuid sqlserver -n <ns>
+      securityContext:
+        fsGroup: 10001
       containers:
         - name: sqlserver
           image: mcr.microsoft.com/mssql/server:2022-latest
