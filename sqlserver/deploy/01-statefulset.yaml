@@ -19,7 +19,8 @@ spec:
     spec:
       serviceAccountName: sqlserver
       # SQL Server requires anyuid SCC on OpenShift (binary needs capabilities restricted-v2 strips).
-      # test.sh grants this automatically. Manual: oc adm policy add-scc-to-serviceaccount anyuid sqlserver -n <ns>
+      # test.sh grants this automatically via RoleBinding.
+      # Manual: kubectl create rolebinding sqlserver-anyuid --clusterrole=system:openshift:scc:anyuid --serviceaccount=<ns>:sqlserver -n <ns>
       securityContext:
         fsGroup: 10001
       containers:
