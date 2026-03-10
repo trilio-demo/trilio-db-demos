@@ -21,7 +21,7 @@ data:
     echo "✅ Connected."
     echo ""
 
-    run() { $SQLCMD -h -1 -Q "SET NOCOUNT ON; $1" 2>/dev/null | tr -d '\r' | grep -v '^$' | head -1; }
+    run() { $SQLCMD -h -1 -Q "SET NOCOUNT ON; $1" 2>/dev/null | tr -d '\r' | (grep -v '^$' || true) | head -1; }
 
     TOTAL=$(run "SELECT COUNT(*) FROM writes_log;")
     MIN_SEQ=$(run "SELECT MIN(seq_num) FROM writes_log;")
@@ -94,7 +94,7 @@ data:
       FROM intervals
       WHERE ms > 2000 AND ms < 60000
       ORDER BY ms DESC;
-    " 2>/dev/null | tr -d '\r' | grep -v '^$' | grep -v '\-\-\-')
+    " 2>/dev/null | tr -d '\r' | grep -v '^$' | grep -v '\-\-\-' || true)
 
     if [ -z "$STALLS" ]; then
       echo "   ✅ No stalls detected — hook and snapshot did not delay writes."
@@ -126,7 +126,7 @@ data:
         CONVERT(VARCHAR,next_time,120)+\'|\'+
         CAST(gap_ms AS VARCHAR(20))
       FROM gaps WHERE gap_ms IS NOT NULL ORDER BY gap_ms DESC;
-    " 2>/dev/null | tr -d '\r' | grep -v '^$' | head -1)
+    " 2>/dev/null | tr -d '\r' | (grep -v '^$' || true) | head -1)
 
     B_GAP_MS=$(echo "$BROW" | cut -d'|' -f5 | tr -d ' ')
     if [ -n "$BROW" ] && [ "${B_GAP_MS:-0}" -gt 60000 ]; then
@@ -160,7 +160,7 @@ data:
           (DATEDIFF(SECOND, CAST(CAST(written_at AS DATE) AS DATETIME2), written_at) / 10) * 10,
           CAST(CAST(written_at AS DATE) AS DATETIME2))
       ORDER BY bucket;
-    " 2>/dev/null | tr -d '\r' | grep -v '^$' | grep -v '\-\-\-')
+    " 2>/dev/null | tr -d '\r' | grep -v '^$' | grep -v '\-\-\-' || true)
 
     echo "$TIMELINE" | while read -r bucket cnt; do
       bar=$(printf '%.0s█' $(seq 1 $cnt))
@@ -182,8 +182,8 @@ data:
       SELECT TOP 5 CAST(seq_num AS VARCHAR(10))+' | '+note
       FROM writes_log
       ORDER BY NEWID();
-    " 2>/dev/null | tr -d '\r' | grep -v '^$')
-    SC_BAD=$(echo "$SC" | grep -v 'trilio-demo-write-' | grep -v '^$' | wc -l | tr -d ' ') || SC_BAD=0
+    " 2>/dev/null | tr -d '\r' | (grep -v '^$' || true))
+    SC_BAD=$(echo "$SC" | (grep -v 'trilio-demo-write-' || true) | (grep -v '^$' || true) | wc -l | tr -d ' ') || SC_BAD=0
     echo "$SC" | while read -r line; do echo "      $line"; done
     if [ "${SC_BAD}" -eq "0" ]; then
       echo "   ✅ All spot-checked rows have correct note format"
