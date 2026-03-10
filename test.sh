@@ -117,7 +117,7 @@ wait_job() {
     failed=$(kubectl get job "$name" -n "$NS" \
       -o jsonpath='{.status.failed}' 2>/dev/null || echo "0")
     if [[ "${succeeded:-0}" -ge 1 ]]; then return 0; fi
-    if [[ "${failed:-0}" -ge 3 ]]; then return 1; fi
+    if [[ "${failed:-0}" -ge 1 ]]; then return 1; fi
     if (( elapsed >= timeout )); then return 2; fi
     sleep 5; (( elapsed += 5 ))
     printf "    %3ds  waiting for job/%s...\r" "$elapsed" "$name"

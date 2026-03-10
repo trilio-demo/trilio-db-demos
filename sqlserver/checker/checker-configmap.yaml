@@ -183,7 +183,7 @@ data:
       FROM writes_log
       ORDER BY NEWID();
     " 2>/dev/null | tr -d '\r' | grep -v '^$')
-    SC_BAD=$(echo "$SC" | grep -v 'trilio-demo-write-' | grep -v '^$' | wc -l | tr -d ' ')
+    SC_BAD=$(echo "$SC" | grep -v 'trilio-demo-write-' | grep -v '^$' | wc -l | tr -d ' ') || SC_BAD=0
     echo "$SC" | while read -r line; do echo "      $line"; done
     if [ "${SC_BAD}" -eq "0" ]; then
       echo "   ✅ All spot-checked rows have correct note format"
