@@ -203,20 +203,21 @@ cmd_deploy() {
 
   step "Deploying writers"
   if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
-    info "High-pressure mode: 10 rows/sec, 50,000 rows per database"
+    info "High-pressure mode: Python persistent-conn, batch=10, ~80-100 rows/sec, 50k rows"
   else
     info "Standard mode: 1 row/sec, 10,000 rows per database"
   fi
   for db in "${DBS[@]}"; do
     local dir="$SCRIPT_DIR/$db"
-    if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
-      kapply "$dir/writer/writer-configmap-highpressure.yaml"
-    else
-      kapply "$dir/writer/writer-configmap.yaml"
-    fi
     # Delete existing writer job if present (jobs are immutable)
     kubectl delete job "${db}-writer" -n "$NS" --ignore-not-found > /dev/null 2>&1
-    kapply "$dir/writer/writer-job.yaml"
+    if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
+      kapply "$dir/writer/writer-configmap-highpressure.yaml"
+      kapply "$dir/writer/writer-job-highpressure.yaml"
+    else
+      kapply "$dir/writer/writer-configmap.yaml"
+      kapply "$dir/writer/writer-job.yaml"
+    fi
   done
 
   step "Deploying Trilio hooks"
@@ -440,13 +441,14 @@ _run_writers() {
   # Apply configmaps + (re)start writer jobs. Respects HIGH_PRESSURE flag.
   for db in "${DBS[@]}"; do
     local dir="$SCRIPT_DIR/$db"
+    kubectl delete job "${db}-writer" -n "$NS" --ignore-not-found > /dev/null 2>&1
     if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
       kapply "$dir/writer/writer-configmap-highpressure.yaml"
+      kapply "$dir/writer/writer-job-highpressure.yaml"
     else
       kapply "$dir/writer/writer-configmap.yaml"
+      kapply "$dir/writer/writer-job.yaml"
     fi
-    kubectl delete job "${db}-writer" -n "$NS" --ignore-not-found > /dev/null 2>&1
-    kapply "$dir/writer/writer-job.yaml"
     info "↺  ${db}-writer started"
   done
 }
@@ -478,7 +480,7 @@ cmd_cycle() {
   echo -e "${BOLD}  CYCLE TEST${NC}"
   echo -e "  delete+restart writers → wait 2min → backup → wait 1min → restore all → check all"
   if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
-    echo -e "  Mode: high-pressure (0.1s/row, 50k rows)"
+    echo -e "  Mode: high-pressure (Python, batch=10, ~80-100 rows/sec, 50k rows)"
   else
     echo -e "  Mode: standard (1s/row, 10k rows)"
   fi

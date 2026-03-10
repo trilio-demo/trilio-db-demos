@@ -2,82 +2,70 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: sqlserver-writer-script
+  labels:
+    app: sqlserver-writer
+    demo: trilio-db-demo
 data:
-  writer.sh: |
-    #!/bin/bash
-    set -euo pipefail
-
-    DB_HOST="${DB_HOST:-sqlserver-service}"
-    DB_PORT="${DB_PORT:-1433}"
-    DB_NAME="${MSSQL_DATABASE:-demodb}"
-    WRITE_INTERVAL="${WRITE_INTERVAL:-0.1}"
-    STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-50000}"
-
-    SQLCMD="/opt/mssql-tools18/bin/sqlcmd -S ${DB_HOST},${DB_PORT} -U sa -P ${SA_PASSWORD} -No"
-
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Trilio for Kubernetes Database Backup Demo — SQL Server 2022 Writer"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Host      : ${DB_HOST}:${DB_PORT}"
-    echo "  Database  : ${DB_NAME}"
-    echo "  Interval  : ${WRITE_INTERVAL}s per batch of ${BATCH_SIZE}"
-    echo "  Target    : ${STOP_AFTER_ROWS} rows then exit"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-    echo "⏳ Waiting for SQL Server at ${DB_HOST}:${DB_PORT}..."
-    until $SQLCMD -Q "SELECT 1" > /dev/null 2>&1; do
-      echo "   Not ready yet, retrying in 5s..."
-      sleep 5
-    done
-    echo "✅ Connected to SQL Server!"
-    echo ""
-
-    $SQLCMD -Q "
-      IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = '${DB_NAME}')
-      BEGIN
-        CREATE DATABASE [${DB_NAME}];
-        ALTER DATABASE [${DB_NAME}] SET RECOVERY FULL;
-      END
-    " > /dev/null
-
-    $SQLCMD -d "${DB_NAME}" -Q "
-      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'writes_log')
-      CREATE TABLE writes_log (
-        id         INT IDENTITY(1,1) PRIMARY KEY,
-        seq_num    BIGINT NOT NULL,
-        written_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        note       NVARCHAR(255)
-      );
-    " > /dev/null
-    echo "📋 Table 'writes_log' ready."
-    echo ""
-
-    LAST_SEQ=$($SQLCMD -d "${DB_NAME}" -h -1 -Q "SET NOCOUNT ON; SELECT ISNULL(MAX(seq_num),0) FROM writes_log" 2>/dev/null | tr -d ' \r\n' || echo "0")
-    seq_num=$((LAST_SEQ + 1))
-
-    echo "📝 Writing ${STOP_AFTER_ROWS} rows from seq #${seq_num} in batches of ${BATCH_SIZE} at ${WRITE_INTERVAL}s/batch."
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-    while [ "$seq_num" -le "$((LAST_SEQ + STOP_AFTER_ROWS))" ]; do
-      ts=$(date -u +"%H:%M:%S")
-      end=$((seq_num + BATCH_SIZE - 1))
-      [ "$end" -gt "$((LAST_SEQ + STOP_AFTER_ROWS))" ] && end=$((LAST_SEQ + STOP_AFTER_ROWS))
-      vals=""
-      for i in $(seq "$seq_num" "$end"); do
-        vals="${vals:+$vals,}(${i},'trilio-demo-write-${i}')"
-      done
-      if $SQLCMD -d "${DB_NAME}" -Q "INSERT INTO writes_log (seq_num, note) VALUES ${vals};" > /dev/null 2>&1; then
-        printf "[%s]  Batch seq=%d–%d (%d rows)  OK\n" "${ts}" "${seq_num}" "${end}" "$((end - seq_num + 1))"
-        seq_num=$((end + 1))
-      else
-        echo "[${ts}]  ERROR writing batch seq=${seq_num}–${end} — retrying in 3s..."
-        sleep 3
-        continue
-      fi
-      sleep "${WRITE_INTERVAL}"
-    done
-
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "✅ Writer complete — ${STOP_AFTER_ROWS} rows written. Job done."
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  writer.py: |
+    #!/usr/bin/env python3
+    import os, time
+    import pymssql
+    
+    host     = os.environ["DB_HOST"]
+    password = os.environ["SA_PASSWORD"]
+    dbname   = os.environ.get("MSSQL_DATABASE", "demodb")
+    interval = float(os.environ.get("WRITE_INTERVAL", "0.1"))
+    batch    = int(os.environ.get("BATCH_SIZE", "10"))
+    stop     = int(os.environ.get("STOP_AFTER_ROWS", "50000"))
+    
+    print("\u2501" * 64)
+    print("  Trilio for Kubernetes \u2014 SQL Server High-Pressure Writer")
+    print("  Interval  : {}s per batch of {}".format(interval, batch))
+    print("  Target    : {} rows then exit".format(stop))
+    print("\u2501" * 64)
+    
+    conn = None
+    while not conn:
+        try:
+            conn = pymssql.connect(server=host, user="sa", password=password, database=dbname)
+        except Exception as e:
+            print("  Waiting for SQL Server... ({})".format(e))
+            time.sleep(5)
+    print("  \u2705 Connected.")
+    
+    cur = conn.cursor()
+    cur.execute("""
+        IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+                       WHERE TABLE_NAME = 'writes_log')
+        CREATE TABLE writes_log (
+            seq_num    BIGINT NOT NULL,
+            written_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+            note       NVARCHAR(200)
+        )
+    """)
+    conn.commit()
+    
+    cur.execute("SELECT ISNULL(MAX(seq_num), 0) FROM writes_log")
+    last = cur.fetchone()[0]
+    seq, end_seq = last + 1, last + stop
+    
+    print("\n\U0001f4dd Writing {} rows from seq #{} in batches of {}.".format(stop, seq, batch))
+    
+    while seq <= end_seq:
+        ts = time.strftime("%H:%M:%S")
+        e  = min(seq + batch - 1, end_seq)
+        data = [(i, "trilio-demo-write-{}".format(i)) for i in range(seq, e + 1)]
+        try:
+            cur.executemany("INSERT INTO writes_log (seq_num, note) VALUES (%d, %s)", data)
+            conn.commit()
+            print("[{}]  Batch seq={}\u2013{} ({} rows)  OK".format(ts, seq, e, e - seq + 1))
+            seq = e + 1
+        except Exception as err:
+            print("[{}]  ERROR: {} \u2014 retrying in 3s...".format(ts, err))
+            conn.rollback()
+            time.sleep(3)
+            continue
+        time.sleep(interval)
+    
+    conn.close()
+    print("\n\u2705 Writer complete \u2014 {} rows written. Job done.".format(stop))

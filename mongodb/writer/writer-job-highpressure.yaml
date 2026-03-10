@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongodb-writer
+  labels:
+    app: mongodb-writer
+    demo: trilio-db-demo
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: mongodb-writer
+        demo: trilio-db-demo
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: writer
+          image: python:3.12-slim
+          command: ["/bin/sh", "-c", "pip install pymongo -q --no-cache-dir && python3 /scripts/writer.py"]
+          env:
+            - name: DB_HOST
+              value: "mongodb-service"
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secret
+                  key: MONGO_INITDB_ROOT_USERNAME
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secret
+                  key: MONGO_INITDB_ROOT_PASSWORD
+            - name: MONGO_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secret
+                  key: MONGO_DATABASE
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: mongodb-writer-script
+            defaultMode: 0755

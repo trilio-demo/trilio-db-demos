@@ -2,65 +2,65 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mongodb-writer-script
+  labels:
+    app: mongodb-writer
+    demo: trilio-db-demo
 data:
-  writer.sh: |
-    #!/bin/bash
-    set -euo pipefail
-
-    DB_HOST="${DB_HOST:-mongodb-service}"
-    DB_PORT="${DB_PORT:-27017}"
-    WRITE_INTERVAL="${WRITE_INTERVAL:-0.1}"
-    STOP_AFTER_ROWS="${STOP_AFTER_ROWS:-50000}"
-
-    MONGO_URI="mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@${DB_HOST}:${DB_PORT}/${MONGO_DATABASE}?authSource=admin"
-    MONGOSH="mongosh --quiet ${MONGO_URI}"
-
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Trilio for Kubernetes Database Backup Demo — MongoDB Writer"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Host      : ${DB_HOST}:${DB_PORT}"
-    echo "  Database  : ${MONGO_DATABASE}"
-    echo "  Interval  : ${WRITE_INTERVAL}s per document"
-    echo "  Target    : ${STOP_AFTER_ROWS} documents then exit"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-    echo "⏳ Waiting for MongoDB at ${DB_HOST}:${DB_PORT}..."
-    until $MONGOSH --eval "db.adminCommand('ping')" > /dev/null 2>&1; do
-      echo "   Not ready yet, retrying in 3s..."
-      sleep 3
-    done
-    echo "✅ Connected to MongoDB!"
-    echo ""
-
-    LAST_SEQ=$($MONGOSH --eval "
-      const doc = db.writes_log.find().sort({seq_num:-1}).limit(1).toArray();
-      doc.length > 0 ? doc[0].seq_num : 0;
-    " 2>/dev/null | tail -1 || echo "0")
-    seq_num=$((LAST_SEQ + 1))
-
-    echo "📝 Writing ${STOP_AFTER_ROWS} docs from seq #${seq_num} in batches of ${BATCH_SIZE} at ${WRITE_INTERVAL}s/batch."
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-    while [ "$seq_num" -le "$((LAST_SEQ + STOP_AFTER_ROWS))" ]; do
-      ts=$(date -u +"%H:%M:%S")
-      end=$((seq_num + BATCH_SIZE - 1))
-      [ "$end" -gt "$((LAST_SEQ + STOP_AFTER_ROWS))" ] && end=$((LAST_SEQ + STOP_AFTER_ROWS))
-      docs=""
-      for i in $(seq "$seq_num" "$end"); do
-        docs="${docs:+$docs,}{seq_num:${i},written_at:new Date(),note:'trilio-demo-write-${i}'}"
-      done
-      if $MONGOSH --eval "db.writes_log.insertMany([${docs}]);" > /dev/null 2>&1; then
-        printf "[%s]  Batch seq=%d–%d (%d docs)  OK\n" "${ts}" "${seq_num}" "${end}" "$((end - seq_num + 1))"
-        seq_num=$((end + 1))
-      else
-        echo "[${ts}]  ERROR writing batch seq=${seq_num}–${end} — retrying in 3s..."
-        sleep 3
-        continue
-      fi
-      sleep "${WRITE_INTERVAL}"
-    done
-
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "✅ Writer complete — ${STOP_AFTER_ROWS} documents written. Job done."
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  writer.py: |
+    #!/usr/bin/env python3
+    import os, time
+    from datetime import datetime
+    from pymongo import MongoClient
+    
+    host     = os.environ["DB_HOST"]
+    user     = os.environ["MONGO_INITDB_ROOT_USERNAME"]
+    password = os.environ["MONGO_INITDB_ROOT_PASSWORD"]
+    dbname   = os.environ["MONGO_DATABASE"]
+    interval = float(os.environ.get("WRITE_INTERVAL", "0.1"))
+    batch    = int(os.environ.get("BATCH_SIZE", "5"))
+    stop     = int(os.environ.get("STOP_AFTER_ROWS", "50000"))
+    
+    print("\u2501" * 64)
+    print("  Trilio for Kubernetes \u2014 MongoDB High-Pressure Writer")
+    print("  Interval  : {}s per batch of {}".format(interval, batch))
+    print("  Target    : {} docs then exit".format(stop))
+    print("\u2501" * 64)
+    
+    client = None
+    while not client:
+        try:
+            uri = "mongodb://{}:{}@{}:27017/".format(user, password, host)
+            client = MongoClient(uri, serverSelectionTimeoutMS=3000)
+            client.admin.command("ping")
+        except Exception as e:
+            print("  Waiting for MongoDB... ({})".format(e))
+            client = None
+            time.sleep(3)
+    print("  \u2705 Connected.")
+    
+    db  = client[dbname]
+    col = db.writes_log
+    
+    last_doc = col.find_one(sort=[("seq_num", -1)])
+    last = last_doc["seq_num"] if last_doc else 0
+    seq, end_seq = last + 1, last + stop
+    
+    print("\n\U0001f4dd Writing {} docs from seq #{} in batches of {}.".format(stop, seq, batch))
+    
+    while seq <= end_seq:
+        ts = time.strftime("%H:%M:%S")
+        e  = min(seq + batch - 1, end_seq)
+        docs = [{"seq_num": i, "written_at": datetime.utcnow(),
+                 "note": "trilio-demo-write-{}".format(i)} for i in range(seq, e + 1)]
+        try:
+            col.insert_many(docs)
+            print("[{}]  Batch seq={}\u2013{} ({} docs)  OK".format(ts, seq, e, e - seq + 1))
+            seq = e + 1
+        except Exception as err:
+            print("[{}]  ERROR: {} \u2014 retrying in 3s...".format(ts, err))
+            time.sleep(3)
+            continue
+        time.sleep(interval)
+    
+    client.close()
+    print("\n\u2705 Writer complete \u2014 {} docs written. Job done.".format(stop))

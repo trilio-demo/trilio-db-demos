@@ -1,0 +1,49 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mariadb-writer
+  labels:
+    app: mariadb-writer
+    demo: trilio-db-demo
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: mariadb-writer
+        demo: trilio-db-demo
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: writer
+          image: python:3.12-slim
+          command: ["/bin/sh", "-c", "pip install pymysql -q --no-cache-dir && python3 /scripts/writer.py"]
+          env:
+            - name: DB_HOST
+              value: "mariadb-service"
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-secret
+                  key: MARIADB_ROOT_PASSWORD
+            - name: MARIADB_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-secret
+                  key: MARIADB_DATABASE
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: mariadb-writer-script
+            defaultMode: 0755
