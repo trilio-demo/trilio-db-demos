@@ -128,10 +128,19 @@ wait_job() {
 wait_tvk() {
   local kind="$1" name="$2" timeout="$3" elapsed=0
   local ok_phase="${4:-Available}"
+  # Use fully-qualified API group to avoid conflicts with other operators
+  # (e.g. CloudNativePG also registers a 'backup' CRD)
+  local fqkind
+  case "$kind" in
+    backup)       fqkind="backups.triliovault.trilio.io" ;;
+    restore)      fqkind="restores.triliovault.trilio.io" ;;
+    backupplan)   fqkind="backupplans.triliovault.trilio.io" ;;
+    *)            fqkind="$kind" ;;
+  esac
   info "Waiting for $kind/$name → $ok_phase (timeout ${timeout}s)..."
   while true; do
     local phase
-    phase=$(kubectl get "$kind" "$name" -n "$NS" \
+    phase=$(kubectl get "$fqkind" "$name" -n "$NS" \
       -o jsonpath='{.status.status}' 2>/dev/null || echo "Unknown")
     if [[ "$phase" == "$ok_phase" ]]; then
       pass "$kind/$name reached phase: $phase"
@@ -139,7 +148,7 @@ wait_tvk() {
     fi
     if [[ "$phase" == "Failed" ]]; then
       fail "$kind/$name failed"
-      kubectl get "$kind" "$name" -n "$NS" \
+      kubectl get "$fqkind" "$name" -n "$NS" \
         -o jsonpath='{.status.conditions}' 2>/dev/null | python3 -m json.tool 2>/dev/null \
         | grep -E '"reason"|"message"' | head -10 | sed 's/^/    /'
       return 1
