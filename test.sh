@@ -178,11 +178,14 @@ cmd_deploy() {
   if command -v oc &>/dev/null; then
     step "OpenShift SCC (SQL Server requires anyuid)"
     kubectl apply -f "$SCRIPT_DIR/sqlserver/deploy/00a-serviceaccount.yaml" -n "$NS" > /dev/null 2>&1
-    if oc adm policy add-scc-to-user anyuid "system:serviceaccount:${NS}:sqlserver" > /dev/null 2>&1; then
-      pass "anyuid SCC granted to sqlserver ServiceAccount"
+    if kubectl create rolebinding sqlserver-anyuid \
+        --clusterrole=system:openshift:scc:anyuid \
+        --serviceaccount="${NS}:sqlserver" \
+        -n "$NS" > /dev/null 2>&1; then
+      pass "anyuid SCC RoleBinding created for sqlserver ServiceAccount"
     else
       warn "Could not grant anyuid SCC — SQL Server will fail. Run manually (requires cluster-admin):"
-      warn "  oc adm policy add-scc-to-user anyuid system:serviceaccount:${NS}:sqlserver"
+      warn "  kubectl create rolebinding sqlserver-anyuid --clusterrole=system:openshift:scc:anyuid --serviceaccount=${NS}:sqlserver -n ${NS}"
     fi
   fi
 
