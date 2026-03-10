@@ -173,6 +173,18 @@ cmd_deploy() {
   kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - > /dev/null 2>&1
   pass "Namespace $NS ready"
 
+  # OpenShift: create sqlserver SA and grant anyuid SCC BEFORE applying the StatefulSet
+  # SQL Server runs as uid 10001 (mssql) which requires anyuid on OpenShift
+  if command -v oc &>/dev/null; then
+    step "OpenShift SCC (SQL Server needs anyuid for UID 10001)"
+    kubectl apply -f "$SCRIPT_DIR/sqlserver/deploy/00a-serviceaccount.yaml" -n "$NS" > /dev/null 2>&1
+    if oc adm policy add-scc-to-serviceaccount anyuid -z sqlserver -n "$NS" > /dev/null 2>&1; then
+      pass "anyuid SCC granted to sqlserver ServiceAccount"
+    else
+      warn "Could not grant anyuid SCC — SQL Server may fail to start (are you cluster-admin?)"
+    fi
+  fi
+
   for db in "${DBS[@]}"; do
     step "Deploy: $db"
     local dir="$SCRIPT_DIR/$db"
@@ -181,16 +193,6 @@ cmd_deploy() {
       kapply "$f"
     done
   done
-
-  # OpenShift: grant anyuid SCC to sqlserver SA so it can run as uid 10001 (mssql)
-  if kubectl api-resources | grep -q "securitycontextconstraints"; then
-    step "OpenShift SCC (SQL Server needs anyuid for UID 10001)"
-    if oc adm policy add-scc-to-serviceaccount anyuid -z sqlserver -n "$NS" > /dev/null 2>&1; then
-      pass "anyuid SCC granted to sqlserver ServiceAccount"
-    else
-      warn "Could not grant anyuid SCC — SQL Server may fail to start (are you cluster-admin?)"
-    fi
-  fi
 
   step "Waiting for all StatefulSets to be ready"
   for db in "${DBS[@]}"; do
