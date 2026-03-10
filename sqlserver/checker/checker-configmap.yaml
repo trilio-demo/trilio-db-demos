@@ -21,7 +21,7 @@ data:
     echo "✅ Connected."
     echo ""
 
-    run() { $SQLCMD -h -1 -Q "SET NOCOUNT ON; $1" 2>/dev/null | tr -d '\r' | (grep -v '^$' || true) | head -1; }
+    run() { $SQLCMD -h -1 -Q "SET NOCOUNT ON; $1" 2>/dev/null | tr -d '\r' | (grep -v '^$' || true) | head -1 | xargs; }
 
     TOTAL=$(run "SELECT COUNT(*) FROM writes_log;")
     MIN_SEQ=$(run "SELECT MIN(seq_num) FROM writes_log;")
@@ -120,10 +120,10 @@ data:
         FROM writes_log
       )
       SELECT TOP 1
-        CAST(seq_num AS VARCHAR(20))+\'|\'+
-        CONVERT(VARCHAR,written_at,120)+\'|\'+
-        CAST(next_seq AS VARCHAR(20))+\'|\'+
-        CONVERT(VARCHAR,next_time,120)+\'|\'+
+        CAST(seq_num AS VARCHAR(20))+'|'+
+        CONVERT(VARCHAR,written_at,120)+'|'+
+        CAST(next_seq AS VARCHAR(20))+'|'+
+        CONVERT(VARCHAR,next_time,120)+'|'+
         CAST(gap_ms AS VARCHAR(20))
       FROM gaps WHERE gap_ms IS NOT NULL ORDER BY gap_ms DESC;
     " 2>/dev/null | tr -d '\r' | (grep -v '^$' || true) | head -1)
