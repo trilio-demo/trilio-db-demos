@@ -11,6 +11,11 @@ spec:
       name: demo-nfs-target    # ← replace with your Target CR name
       namespace: trilio-system # ← replace with your Target CR namespace
 
+    # ─── IMAGE BACKUP ───────────────────────────────────────────────────────
+    # Skip pulling image manifests from Docker Hub to avoid rate-limit errors.
+    # Data PVC snapshots are unaffected — this only skips image metadata backup.
+    skipImageBackup: true
+
   # ─── HOOK CONFIGURATION ─────────────────────────────────────────────────
   # Parallel mode: all 4 database hooks fire simultaneously.
   # Each hook quiesces its own DB (checkpoint/flush/lock) while the volume
