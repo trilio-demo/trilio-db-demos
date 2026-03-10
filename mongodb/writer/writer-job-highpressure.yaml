@@ -18,7 +18,7 @@ spec:
       containers:
         - name: writer
           image: python:3.12-slim
-          command: ["/bin/sh", "-c", "pip install pymongo -q --no-cache-dir && python3 /scripts/writer.py"]
+          command: ["/bin/sh", "-c", "pip install pymongo -q --no-cache-dir --target /tmp/deps && PYTHONPATH=/tmp/deps python3 /scripts/writer.py"]
           env:
             - name: DB_HOST
               value: "mongodb-service"
