@@ -25,7 +25,6 @@
 #
 #  Environment overrides:
 #    NAMESPACE      (default: trilio-demo)
-#    BACKUP_NAME    (default: all-dbs-backup)
 #    TIMEOUT_READY  pod ready timeout in seconds  (default: 300)
 #    TIMEOUT_BACKUP backup completion timeout     (default: 1800)
 #    TIMEOUT_RESTORE restore completion timeout   (default: 1800)
@@ -35,7 +34,7 @@ set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
 NS="${NAMESPACE:-trilio-demo}"
-BACKUP_NAME="${BACKUP_NAME:-all-dbs-backup}"
+BACKUP_NAME=""   # set dynamically in cmd_backup as all-dbs-backup-YYYYMMDD-HHMMSS
 TIMEOUT_READY="${TIMEOUT_READY:-300}"
 TIMEOUT_BACKUP="${TIMEOUT_BACKUP:-1800}"
 TIMEOUT_RESTORE="${TIMEOUT_RESTORE:-1800}"
@@ -244,6 +243,9 @@ cmd_deploy() {
 }
 
 cmd_backup() {
+  # Generate a unique timestamp-based name so every run creates a new backup
+  BACKUP_NAME="all-dbs-backup-$(date +%Y%m%d-%H%M%S)"
+
   div
   echo -e "${BOLD}  BACKUP — $BACKUP_NAME${NC}"
   div
@@ -267,10 +269,18 @@ cmd_backup() {
   done
 
   step "Creating backup"
-  # Delete existing backup object if present
-  kubectl delete backup "$BACKUP_NAME" -n "$NS" --ignore-not-found > /dev/null 2>&1
-  sleep 2
-  kapply "$SCRIPT_DIR/shared/trilio/backup.yaml"
+  kubectl apply -f - -n "$NS" > /dev/null << EOF
+apiVersion: triliovault.trilio.io/v1
+kind: Backup
+metadata:
+  name: ${BACKUP_NAME}
+  namespace: ${NS}
+spec:
+  backupPlan:
+    name: all-dbs-backupplan
+  type: Full
+EOF
+  pass "Applied backup ${BACKUP_NAME}"
 
   step "Waiting for backup to complete"
   wait_tvk backup "$BACKUP_NAME" "$TIMEOUT_BACKUP" "Available" || true
@@ -294,17 +304,57 @@ cmd_restore() {
   done
 
   step "Triggering restore"
+  # Always restore from the latest available backup
+  local latest_backup
+  latest_backup=$(kubectl get backup -n "$NS" \
+    --sort-by='.metadata.creationTimestamp' \
+    -o jsonpath='{.items[-1].metadata.name}' 2>/dev/null)
+  if [[ -z "$latest_backup" ]]; then
+    die "No backup found in namespace $NS — run './test.sh backup' first"
+  fi
+  info "Restoring from: $latest_backup"
+
   if [[ "$target" == "all" ]]; then
     local restore_name="all-dbs-restore"
     kubectl delete restore "$restore_name" -n "$NS" --ignore-not-found > /dev/null 2>&1
     sleep 2
-    kapply "$SCRIPT_DIR/shared/trilio/restore-all.yaml"
+    kubectl apply -f - -n "$NS" > /dev/null << EOF
+apiVersion: triliovault.trilio.io/v1
+kind: Restore
+metadata:
+  name: ${restore_name}
+  namespace: ${NS}
+spec:
+  source:
+    type: Backup
+    backup:
+      name: ${latest_backup}
+      namespace: ${NS}
+  restoreFlags:
+    skipIfAlreadyExists: true
+EOF
+    pass "Applied restore ${restore_name} from ${latest_backup}"
     wait_tvk restore "$restore_name" "$TIMEOUT_RESTORE" "Completed" || true
   else
     local restore_name="${target}-restore"
     kubectl delete restore "$restore_name" -n "$NS" --ignore-not-found > /dev/null 2>&1
     sleep 2
-    kapply "$SCRIPT_DIR/shared/trilio/restore-${target}.yaml"
+    kubectl apply -f - -n "$NS" > /dev/null << EOF
+apiVersion: triliovault.trilio.io/v1
+kind: Restore
+metadata:
+  name: ${restore_name}
+  namespace: ${NS}
+spec:
+  source:
+    type: Backup
+    backup:
+      name: ${latest_backup}
+      namespace: ${NS}
+  restoreFlags:
+    skipIfAlreadyExists: true
+EOF
+    pass "Applied restore ${restore_name} from ${latest_backup}"
     wait_tvk restore "$restore_name" "$TIMEOUT_RESTORE" "Completed" || true
   fi
 
