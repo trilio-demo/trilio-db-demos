@@ -37,10 +37,6 @@ spec:
                 secretKeyRef:
                   name: mongodb-secret
                   key: MONGO_DATABASE
-            - name: WRITE_INTERVAL
-              value: "1"
-            - name: STOP_AFTER_ROWS
-              value: "10000"
           resources:
             requests:
               cpu: 50m

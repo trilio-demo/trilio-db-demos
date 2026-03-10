@@ -29,10 +29,6 @@ spec:
                   key: SA_PASSWORD
             - name: MSSQL_DATABASE
               value: "demodb"
-            - name: WRITE_INTERVAL
-              value: "1"
-            - name: STOP_AFTER_ROWS
-              value: "10000"
           resources:
             requests:
               cpu: 50m

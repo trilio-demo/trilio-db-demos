@@ -37,10 +37,6 @@ spec:
                 secretKeyRef:
                   name: postgres-secret
                   key: POSTGRES_DB
-            - name: WRITE_INTERVAL
-              value: "1"
-            - name: STOP_AFTER_ROWS
-              value: "10000"   # ~2.7 hours at 1 row/sec
           resources:
             requests:
               cpu: 50m
