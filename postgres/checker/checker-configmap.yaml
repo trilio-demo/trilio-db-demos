@@ -221,7 +221,7 @@ data:
     $PSQL -c "INSERT INTO writes_log (seq_num, written_at, note) VALUES (${NEXT_SEQ}, NOW(), 'checker-write-test');" > /dev/null 2>&1 && WRITE_OK=1 || true
 
     if [ "$WRITE_OK" -eq 1 ]; then
-      READ_BACK=$($PSQL -c "SELECT note FROM writes_log WHERE seq_num=${NEXT_SEQ};")
+      READ_BACK=$($PSQL -c "SELECT note FROM writes_log WHERE seq_num=${NEXT_SEQ} AND note='checker-write-test' LIMIT 1;")
       if [ "$READ_BACK" = "checker-write-test" ]; then
         echo "   ✅ INSERT + SELECT verified (seq=${NEXT_SEQ})"
       else
