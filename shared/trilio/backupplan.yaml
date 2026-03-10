@@ -8,8 +8,8 @@ spec:
     # ─── TARGET ─────────────────────────────────────────────────────────────
     # Adapt to match your pre-configured Trilio for Kubernetes Target CR.
     target:
-      name: <YOUR_TARGET_NAME>    # ← replace with your Target CR name
-      namespace: <YOUR_TARGET_NS> # ← replace with your Target CR namespace
+      name: demo-nfs-target    # ← replace with your Target CR name
+      namespace: trilio-system # ← replace with your Target CR namespace
 
   # ─── HOOK CONFIGURATION ─────────────────────────────────────────────────
   # Parallel mode: all 4 database hooks fire simultaneously.

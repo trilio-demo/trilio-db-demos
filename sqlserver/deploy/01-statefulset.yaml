@@ -17,10 +17,7 @@ spec:
         app: sqlserver
         demo: trilio-db-demo
     spec:
-      serviceAccountName: sqlserver
-      # SQL Server runs as uid 10001 (mssql) — requires anyuid SCC on OpenShift
-      securityContext:
-        fsGroup: 10001
+      # SQL Server 2022 supports arbitrary UIDs — no fsGroup needed, works with restricted-v2 SCC
       containers:
         - name: sqlserver
           image: mcr.microsoft.com/mssql/server:2022-latest

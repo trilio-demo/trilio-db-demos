@@ -173,25 +173,6 @@ cmd_deploy() {
   kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - > /dev/null 2>&1
   pass "Namespace $NS ready"
 
-  # OpenShift: pre-create sqlserver SA and SCC RoleBinding BEFORE the StatefulSet
-  # 00a-serviceaccount.yaml + 00b-scc-rolebinding.yaml are applied here so the SCC
-  # is in place before the StatefulSet controller tries to create the pod.
-  # If the RoleBinding fails (plain k8s or insufficient permissions), fall back to
-  # oc adm policy; if that also fails, warn and continue — the SCC error will surface
-  # in the StatefulSet events.
-  if command -v oc &>/dev/null; then
-    step "OpenShift SCC (SQL Server needs anyuid for UID 10001)"
-    kubectl apply -f "$SCRIPT_DIR/sqlserver/deploy/00a-serviceaccount.yaml" -n "$NS" > /dev/null 2>&1
-    if kubectl apply -f "$SCRIPT_DIR/sqlserver/deploy/00b-scc-rolebinding.yaml" -n "$NS" > /dev/null 2>&1; then
-      pass "anyuid SCC RoleBinding applied for sqlserver ServiceAccount"
-    elif oc adm policy add-scc-to-serviceaccount anyuid sqlserver -n "$NS" > /dev/null 2>&1; then
-      pass "anyuid SCC granted via oc adm policy"
-    else
-      warn "Could not grant anyuid SCC — if SQL Server fails, run manually:"
-      warn "  oc adm policy add-scc-to-serviceaccount anyuid sqlserver -n $NS"
-    fi
-  fi
-
   for db in "${DBS[@]}"; do
     step "Deploy: $db"
     local dir="$SCRIPT_DIR/$db"
