@@ -174,19 +174,14 @@ cmd_deploy() {
   pass "Namespace $NS ready"
 
   # OpenShift: SQL Server binary needs capabilities that restricted-v2 strips — anyuid SCC required.
-  # Must be done BEFORE the StatefulSet is created so the pod can start immediately.
-  if command -v oc &>/dev/null; then
-    step "OpenShift SCC (SQL Server requires anyuid)"
-    kubectl apply -f "$SCRIPT_DIR/sqlserver/deploy/00a-serviceaccount.yaml" -n "$NS" > /dev/null 2>&1
-    if kubectl create rolebinding sqlserver-anyuid \
-        --clusterrole=system:openshift:scc:anyuid \
-        --serviceaccount="${NS}:sqlserver" \
-        -n "$NS" > /dev/null 2>&1; then
-      pass "anyuid SCC RoleBinding created for sqlserver ServiceAccount"
-    else
-      warn "Could not grant anyuid SCC — SQL Server will fail. Run manually (requires cluster-admin):"
-      warn "  kubectl create rolebinding sqlserver-anyuid --clusterrole=system:openshift:scc:anyuid --serviceaccount=${NS}:sqlserver -n ${NS}"
-    fi
+  # Applied via a RoleBinding manifest so it works on any OCP version without oc-specific commands.
+  # On plain Kubernetes the ClusterRole won't exist and this will fail silently — safe to ignore.
+  step "SQL Server SCC (OpenShift anyuid via RoleBinding)"
+  kubectl apply -f "$SCRIPT_DIR/sqlserver/deploy/00a-serviceaccount.yaml" -n "$NS" > /dev/null 2>&1
+  if kubectl apply -f "$SCRIPT_DIR/sqlserver/deploy/00b-scc-rolebinding.yaml" -n "$NS" > /dev/null 2>&1; then
+    pass "anyuid SCC RoleBinding applied for sqlserver ServiceAccount"
+  else
+    warn "Could not apply anyuid SCC RoleBinding — SQL Server may fail on OpenShift (requires cluster-admin)"
   fi
 
   for db in "${DBS[@]}"; do

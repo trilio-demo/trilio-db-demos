@@ -1,0 +1,14 @@
+# OpenShift only: grants anyuid SCC to the sqlserver ServiceAccount via RBAC.
+# SQL Server binary requires capabilities that restricted-v2 SCC strips.
+# On plain Kubernetes this will fail silently (ClusterRole doesn't exist) — safe to ignore.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sqlserver-anyuid-scc
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:anyuid
+subjects:
+  - kind: ServiceAccount
+    name: sqlserver
