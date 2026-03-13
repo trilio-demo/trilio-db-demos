@@ -23,8 +23,10 @@ SQL Server has stricter infrastructure requirements than the other databases:
 #          SQL Server takes 30–60s to initialize — wait for ready before proceeding
 kubectl create namespace trilio-demo
 
-# OpenShift only: SQL Server requires UID/GID 10001 — grant anyuid SCC
-oc adm policy add-scc-to-user anyuid -z default -n trilio-demo
+# OpenShift only: SQL Server requires UID/GID 10001 — grant anyuid SCC to the 'sqlserver' ServiceAccount.
+# The deploy/ manifests include 00a-serviceaccount.yaml and 00b-scc-rolebinding.yaml that handle this
+# automatically via kubectl apply. The manual oc command below is an alternative if you prefer:
+#   oc adm policy add-scc-to-user anyuid -z sqlserver -n trilio-demo
 
 kubectl apply -f deploy/ -n trilio-demo
 kubectl rollout status statefulset/sqlserver -n trilio-demo
@@ -169,16 +171,22 @@ See [`pitr/README.md`](pitr/README.md) for the full setup and step-by-step recov
 ```
 sqlserver/
 ├── deploy/
-│   ├── 00-secret.yaml
-│   ├── 01-statefulset.yaml     SQL Server 2022 with 10Gi PVC, 2Gi RAM minimum
+│   ├── 00-secret.yaml              SA_PASSWORD + MSSQL_DATABASE
+│   ├── 00a-serviceaccount.yaml     'sqlserver' ServiceAccount (required for anyuid SCC on OpenShift)
+│   ├── 00b-scc-rolebinding.yaml    RoleBinding: sqlserver SA → system:openshift:scc:anyuid
+│   ├── 01-statefulset.yaml         SQL Server 2022 with 10Gi PVC, 2Gi RAM minimum
 │   └── 02-service.yaml
 ├── writer/
-│   ├── writer-configmap.yaml
-│   └── writer-deployment.yaml
+│   ├── writer-configmap.yaml               Standard writer (bash, 1 row/sec, 10k rows)
+│   ├── writer-configmap-highpressure.yaml  High-pressure writer (bash+sqlcmd, batches of 50, 50k rows)
+│   ├── writer-job.yaml
+│   └── writer-job-highpressure.yaml
 ├── checker/
+│   ├── checker-configmap.yaml              Checker script (gap check, DBCC CHECKDB, timeline)
 │   └── consistency-checker-job.yaml
 └── trilio/
     ├── hook.yaml               pre: CHECKPOINT, post: CHECKPOINT
     ├── backupplan.yaml         (edit target name/namespace)
-    └── backup.yaml
+    ├── backup.yaml
+    └── restore.yaml
 ```

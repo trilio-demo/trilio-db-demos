@@ -213,7 +213,7 @@ cmd_deploy() {
 
   step "Deploying writers"
   if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
-    info "High-pressure mode: Python persistent-conn, batch=10, ~80-100 rows/sec, 50k rows"
+    info "High-pressure mode: batch inserts, 50k rows (postgres/mariadb/mongodb: Python+pip, ~100 rows/sec; sqlserver: bash+sqlcmd batches of 50, no rate limit)"
   else
     info "Standard mode: 1 row/sec, 10,000 rows per database"
   fi
@@ -595,7 +595,7 @@ cmd_cycle() {
   echo -e "${BOLD}  CYCLE TEST${NC}"
   echo -e "  delete+restart writers → wait 2min → backup → wait 1min → wipe sts+pvcs → restore → check"
   if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
-    echo -e "  Mode: high-pressure (Python, batch=10, ~80-100 rows/sec, 50k rows)"
+    echo -e "  Mode: high-pressure (batch inserts, 50k rows — see deploy output for per-DB rates)"
   else
     echo -e "  Mode: standard (1s/row, 10k rows)"
   fi

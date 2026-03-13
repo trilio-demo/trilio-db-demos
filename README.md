@@ -34,7 +34,7 @@ This repo proves it: a **writer Job** inserts numbered rows at 1 row/sec (10,000
 - Trilio for Kubernetes installed
 - A Trilio for Kubernetes **Target** pre-configured in your cluster (S3, NFS, or other)
 - `kubectl` configured for your cluster
-- For OpenShift: `oc` CLI available (used by `test.sh` for SCC configuration)
+- For OpenShift: cluster-admin rights to apply the `anyuid` SCC RoleBinding for SQL Server (applied automatically by `test.sh` via `kubectl apply`)
 
 ---
 
@@ -112,7 +112,7 @@ Each database has two writer configmaps:
 | File | Mode | Rate | Rows | ~Duration |
 |------|------|------|------|-----------|
 | `writer-configmap.yaml` | Standard | 1 row/sec | 10,000 | 2.7h |
-| `writer-configmap-highpressure.yaml` | High-pressure | 10 rows/sec | 50,000 | 83 min |
+| `writer-configmap-highpressure.yaml` | High-pressure | ~100 rows/sec (postgres/mariadb/mongodb: Python batches of 10; sqlserver: bash+sqlcmd batches of 50, no rate cap) | 50,000 | ~8 min |
 
 Using `test.sh`, select the mode at deploy time:
 
