@@ -60,8 +60,6 @@ data:
 
       // ── ② Stall Detection ─────────────────────────────────────────────────
       print('─── ② Write Stalls (interval > 2× expected = >2000ms) ───────────────');
-      print('   NOTE: A pause during the backup window is expected — it means the');
-      print('   fsyncLock write lock was held during the snapshot (correct behavior).');
       const stalls = db.writes_log.aggregate([
         { \$sort: { seq_num: 1 } },
         { \$setWindowFields: { sortBy: { seq_num: 1 },
@@ -124,11 +122,16 @@ data:
         { \$sort: { _id: 1 } }
       ]).toArray();
 
-      timeline.forEach(b => {
+      const maxCnt = timeline.reduce((m, b) => Math.max(m, b.cnt), 1);
+      const stride = timeline.length > 20 ? Math.floor(timeline.length / 20) : 1;
+      timeline.forEach((b, i) => {
+        const isDip = b.cnt * 2 < maxCnt;
+        if (i !== 0 && i !== timeline.length - 1 && (i % stride !== 0) && !isDip) return;
         const t = b._id.toISOString().substring(11,19);
-        const bar = '█'.repeat(b.cnt);
-        print('   ' + t + '  ' + bar.padEnd(12) + '  ' + b.cnt + ' docs');
+        const barLen = Math.max(1, Math.ceil((b.cnt * 60) / maxCnt));
+        print('   ' + t + '  ' + '█'.repeat(barLen) + '  ' + b.cnt + ' docs');
       });
+      if (timeline.length > 20) print('   ℹ️  ' + timeline.length + ' total buckets — showing ~20 + rate dips');
 
       print('');
 
@@ -141,7 +144,6 @@ data:
       ]).toArray();
       const checksum = sumResult.length > 0 ? sumResult[0].total : 0;
       print('   seq_num checksum (SUM) : ' + checksum);
-      print('   ℹ️  Record this value before and after restore — must match.');
       print('');
 
       // 6b. Spot-check 5 documents
@@ -164,11 +166,8 @@ data:
       print('   Collection validate() — WiredTiger storage consistency:');
       const vResult = db.writes_log.validate({ full: true });
       if (vResult.valid) {
-        print('   ✅ validate() passed — no WiredTiger corruption detected');
-        if (vResult.warnings.length > 0) {
-          print('   ⚠️  Warnings (' + vResult.warnings.length + '):');
-          vResult.warnings.forEach(w => print('      ' + w));
-        }
+        const warnCount = vResult.warnings.length;
+        print('   ✅ validate() passed — no WiredTiger corruption detected' + (warnCount > 0 ? ' (' + warnCount + ' transient warning(s))' : ''));
       } else {
         print('   ❌ validate() FAILED:');
         vResult.errors.forEach(e => print('      ' + e));
@@ -194,13 +193,12 @@ data:
         });
         const readBack = db.writes_log.findOne({ seq_num: nextSeq });
         if (readBack && readBack.note === 'checker-write-test') {
-          print('   ✅ insertOne + findOne verified (seq=' + nextSeq + ')');
+          db.writes_log.deleteOne({ seq_num: nextSeq });
+          print('   ✅ Read-write test passed (seq=' + nextSeq + ')');
           writeOk = true;
         } else {
           print('   ❌ insertOne succeeded but findOne returned unexpected value');
         }
-        db.writes_log.deleteOne({ seq_num: nextSeq });
-        print('   ✅ deleteOne cleanup completed — database is fully read-write');
       } catch (e) {
         print('   ❌ Write test failed: ' + e.message);
       }

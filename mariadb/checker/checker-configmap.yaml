@@ -124,17 +124,31 @@ data:
       ORDER BY bucket;
     ")
 
+    MAX_CNT=1; NROWS=0
     while IFS=$'\t' read -r bucket cnt; do
-      bar=$(printf '%.0s█' $(seq 1 $cnt))
-      printf "   %s  %-12s  %s rows\n" "$bucket" "$bar" "$cnt"
+      [ -z "$cnt" ] && continue
+      NROWS=$((NROWS + 1)); [ "$cnt" -gt "$MAX_CNT" ] && MAX_CNT=$cnt
     done <<< "$TIMELINE"
+    STRIDE=1; [ "$NROWS" -gt 20 ] && STRIDE=$(( NROWS / 20 ))
+    ROW_N=0
+    while IFS=$'\t' read -r bucket cnt; do
+      [ -z "$cnt" ] && continue
+      ROW_N=$((ROW_N + 1))
+      is_dip=$(( cnt * 2 < MAX_CNT ? 1 : 0 ))
+      if [ "$ROW_N" -ne 1 ] && [ "$ROW_N" -ne "$NROWS" ] && [ $((ROW_N % STRIDE)) -ne 0 ] && [ "$is_dip" -eq 0 ]; then
+        continue
+      fi
+      bar_len=$(( (cnt * 60 + MAX_CNT - 1) / MAX_CNT ))
+      [ "$bar_len" -lt 1 ] && bar_len=1
+      printf "   %s  %s  %s rows\n" "$bucket" "$(printf '%.0s█' $(seq 1 $bar_len))" "$cnt"
+    done <<< "$TIMELINE"
+    [ "$NROWS" -gt 20 ] && echo "   ℹ️  ${NROWS} total buckets — showing ~20 + rate dips"
 
     echo ""
     echo "─── ⑤ Data Integrity ────────────────────────────────────────────────"
     # 6a. Checksum: SUM of all seq_num
     CHECKSUM=$(sql "SELECT CAST(SUM(CAST(seq_num AS UNSIGNED)) AS CHAR) FROM writes_log;")
     echo "   seq_num checksum (SUM) : ${CHECKSUM}"
-    echo "   ℹ️  Record this value before and after restore — must match."
     echo ""
 
     # 6b. Spot-check 5 rows
@@ -177,13 +191,12 @@ data:
     if [ "$WRITE_OK" -eq 1 ]; then
       READ_BACK=$(sql "SELECT note FROM writes_log WHERE seq_num=-1 LIMIT 1;")
       if [ "$READ_BACK" = "checker-write-test" ]; then
-        echo "   ✅ INSERT + SELECT verified"
+        sql "DELETE FROM writes_log WHERE seq_num=-1;" > /dev/null 2>&1 || true
+        echo "   ✅ Read-write test passed"
       else
         echo "   ❌ INSERT succeeded but SELECT returned unexpected value: '${READ_BACK}'"
         WRITE_OK=0
       fi
-      sql "DELETE FROM writes_log WHERE seq_num=-1;" > /dev/null 2>&1 || true
-      echo "   ✅ DELETE cleanup completed — database is fully read-write"
     else
       echo "   ❌ INSERT failed — database may be read-only or in recovery"
     fi

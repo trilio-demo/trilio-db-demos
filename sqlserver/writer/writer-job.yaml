@@ -15,6 +15,7 @@ spec:
         demo: trilio-db-demo
     spec:
       restartPolicy: Never
+      serviceAccountName: sqlserver
       containers:
         - name: writer
           image: mcr.microsoft.com/mssql/server:2022-latest

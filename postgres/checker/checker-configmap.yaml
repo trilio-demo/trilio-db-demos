@@ -121,8 +121,6 @@ data:
     echo ""
 
     echo "─── ④ Write Rate Timeline (rows per 10-second bucket) ───────────────"
-    echo "   (a dip here during the backup window shows hook/snapshot impact)"
-    echo ""
     TIMELINE=$($PSQL -c "
       SELECT
         to_char(
@@ -136,19 +134,32 @@ data:
       ORDER BY 1;
     ")
 
+    MAX_CNT=1; NROWS=0
     while IFS='|' read -r bucket cnt; do
-      bucket=$(echo "$bucket" | tr -d ' ')
-      cnt=$(echo "$cnt" | tr -d ' ')
-      bar=$(printf '%.0s█' $(seq 1 $cnt))
-      printf "   %s  %-12s  %s rows\n" "$bucket" "$bar" "$cnt"
+      cnt=$(echo "$cnt" | tr -d ' '); [ -z "$cnt" ] && continue
+      NROWS=$((NROWS + 1)); [ "$cnt" -gt "$MAX_CNT" ] && MAX_CNT=$cnt
     done <<< "$TIMELINE"
+    STRIDE=1; [ "$NROWS" -gt 20 ] && STRIDE=$(( NROWS / 20 ))
+    ROW_N=0
+    while IFS='|' read -r bucket cnt; do
+      bucket=$(echo "$bucket" | tr -d ' '); cnt=$(echo "$cnt" | tr -d ' ')
+      [ -z "$cnt" ] && continue
+      ROW_N=$((ROW_N + 1))
+      is_dip=$(( cnt * 2 < MAX_CNT ? 1 : 0 ))
+      if [ "$ROW_N" -ne 1 ] && [ "$ROW_N" -ne "$NROWS" ] && [ $((ROW_N % STRIDE)) -ne 0 ] && [ "$is_dip" -eq 0 ]; then
+        continue
+      fi
+      bar_len=$(( (cnt * 60 + MAX_CNT - 1) / MAX_CNT ))
+      [ "$bar_len" -lt 1 ] && bar_len=1
+      printf "   %s  %s  %s rows\n" "$bucket" "$(printf '%.0s█' $(seq 1 $bar_len))" "$cnt"
+    done <<< "$TIMELINE"
+    [ "$NROWS" -gt 20 ] && echo "   ℹ️  ${NROWS} total buckets — showing ~20 + rate dips"
 
     echo ""
     echo "─── ⑤ Data Integrity ────────────────────────────────────────────────"
     # 6a. Checksum: SUM of all seq_num — deterministic, reproducible
     CHECKSUM=$($PSQL -c "SELECT SUM(seq_num::bigint)::text FROM writes_log;")
     echo "   seq_num checksum (SUM) : ${CHECKSUM}"
-    echo "   ℹ️  Record this value before and after restore — must match."
     echo ""
 
     # 6b. Spot-check 5 rows: verify note field format
@@ -196,13 +207,12 @@ data:
     if [ "$WRITE_OK" -eq 1 ]; then
       READ_BACK=$($PSQL -c "SELECT note FROM writes_log WHERE seq_num=${NEXT_SEQ} AND note='checker-write-test' LIMIT 1;")
       if [ "$READ_BACK" = "checker-write-test" ]; then
-        echo "   ✅ INSERT + SELECT verified (seq=${NEXT_SEQ})"
+        $PSQL -c "DELETE FROM writes_log WHERE seq_num=${NEXT_SEQ} AND note='checker-write-test';" > /dev/null 2>&1 || true
+        echo "   ✅ Read-write test passed (seq=${NEXT_SEQ})"
       else
         echo "   ❌ INSERT succeeded but SELECT returned unexpected value: '${READ_BACK}'"
         WRITE_OK=0
       fi
-      $PSQL -c "DELETE FROM writes_log WHERE seq_num=${NEXT_SEQ} AND note='checker-write-test';" > /dev/null 2>&1 || true
-      echo "   ✅ DELETE cleanup completed — database is fully read-write"
     else
       echo "   ❌ INSERT failed — database may be read-only or in recovery"
     fi

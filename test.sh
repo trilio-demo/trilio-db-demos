@@ -258,15 +258,46 @@ cmd_backup() {
 
   step "Checking writers are running"
   for db in "${DBS[@]}"; do
-    local running
+    local running succeeded
     running=$(kubectl get job "${db}-writer" -n "$NS" \
       -o jsonpath='{.status.active}' 2>/dev/null || echo "0")
+    succeeded=$(kubectl get job "${db}-writer" -n "$NS" \
+      -o jsonpath='{.status.succeeded}' 2>/dev/null || echo "0")
     if [[ "${running:-0}" -ge 1 ]]; then
       pass "Writer job ${db}-writer is active"
+    elif [[ "${succeeded:-0}" -ge 1 ]]; then
+      pass "Writer job ${db}-writer completed (all rows written)"
     else
       warn "Writer job ${db}-writer is NOT active — backup will still work but no live writes"
     fi
   done
+
+  # Wait until sqlserver has at least 100 rows before backing up.
+  # Query via sqlserver-0 pod directly (mssql-tools are available there).
+  local ss_rows ss_wait=0 ss_pass
+  ss_pass=$(kubectl get secret sqlserver-secret -n "$NS" \
+    -o jsonpath='{.data.SA_PASSWORD}' 2>/dev/null | base64 -d || echo "")
+  if [[ -n "$ss_pass" ]]; then
+    info "Waiting for sqlserver to have rows before backup..."
+    while true; do
+      ss_rows=$(kubectl exec -n "$NS" sqlserver-0 -- \
+        /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "${ss_pass}" \
+        -No -d demodb -h -1 -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM writes_log" 2>/dev/null \
+        | tr -d '[:space:]' || echo "0")
+      if [[ "${ss_rows:-0}" -ge 100 ]]; then
+        pass "sqlserver has ${ss_rows} rows — ready for backup"
+        break
+      fi
+      ss_wait=$((ss_wait + 10))
+      if [[ "$ss_wait" -ge 300 ]]; then
+        warn "sqlserver has only ${ss_rows:-0} rows after ${ss_wait}s — proceeding anyway"
+        break
+      fi
+      printf "    sqlserver rows: %s — waiting...\r" "${ss_rows:-0}"
+      sleep 10
+    done
+    echo ""
+  fi
 
   step "Creating backup"
   kubectl apply -f - -n "$NS" > /dev/null << EOF

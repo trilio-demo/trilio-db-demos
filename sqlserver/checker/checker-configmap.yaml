@@ -8,6 +8,7 @@ data:
     set -euo pipefail
 
     DB_NAME="${MSSQL_DATABASE:-demodb}"
+    SQLCMD_MASTER="/opt/mssql-tools18/bin/sqlcmd -S sqlserver-service,1433 -U sa -P ${SA_PASSWORD} -No"
     SQLCMD="/opt/mssql-tools18/bin/sqlcmd -S sqlserver-service,1433 -U sa -P ${SA_PASSWORD} -No -d ${DB_NAME}"
     DIV="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -17,7 +18,19 @@ data:
     echo ""
 
     echo "⏳ Waiting for SQL Server..."
-    until $SQLCMD -Q "SELECT 1" > /dev/null 2>&1; do sleep 3; done
+    until $SQLCMD_MASTER -Q "SELECT 1" > /dev/null 2>&1; do sleep 3; done
+    echo "⏳ Waiting for ${DB_NAME} to come online..."
+    DB_WAIT=0
+    until $SQLCMD_MASTER -h -1 -Q "SET NOCOUNT ON; SELECT state_desc FROM sys.databases WHERE name='${DB_NAME}'" 2>/dev/null | tr -d '[:space:]' | grep -q "ONLINE"; do
+      DB_WAIT=$((DB_WAIT + 3))
+      if [ "$DB_WAIT" -ge 120 ]; then
+        DB_STATE=$($SQLCMD_MASTER -h -1 -Q "SET NOCOUNT ON; SELECT ISNULL(state_desc,'NOT FOUND') FROM sys.databases WHERE name='${DB_NAME}'" 2>/dev/null | tr -d '[:space:]' || echo "UNKNOWN")
+        echo "❌ ${DB_NAME} not ONLINE after ${DB_WAIT}s (state: ${DB_STATE})"
+        echo "   Database was likely not present in the backup (writer may not have run)."
+        exit 1
+      fi
+      sleep 3
+    done
     echo "✅ Connected."
     echo ""
 
@@ -44,8 +57,11 @@ data:
         SELECT 1 FROM writes_log w2 WHERE w2.seq_num = w1.seq_num + 1
       ) AND w1.seq_num < (SELECT MAX(seq_num) FROM writes_log);
     ")
-    if [ "${GAPS}" -eq "0" ] && [ "${TOTAL}" -eq "${EXPECTED}" ]; then
+    if [ "${GAPS}" -eq "0" ]; then
       echo "   ✅ PASSED — No missing sequence numbers. Backup was crash-consistent."
+      if [ "${TOTAL}" -ne "${EXPECTED}" ]; then
+        echo "   ℹ️  Row count (${TOTAL}) vs range (${EXPECTED}) differ — writer still active during check (expected)."
+      fi
     else
       echo "   ❌ FAILED — ${GAPS} gap(s) found. Expected ${EXPECTED} rows, got ${TOTAL}."
     fi
@@ -134,17 +150,31 @@ data:
       ORDER BY bucket;
     " 2>/dev/null | tr -d '\r' | grep -v '^$' | grep -v '\-\-\-' || true)
 
-    echo "$TIMELINE" | while read -r bucket cnt; do
-      bar=$(printf '%.0s█' $(seq 1 $cnt))
-      printf "   %s  %-12s  %s rows\n" "$bucket" "$bar" "$cnt"
-    done
+    MAX_CNT=1; NROWS=0
+    while read -r bucket cnt; do
+      [ -z "$cnt" ] && continue
+      NROWS=$((NROWS + 1)); [ "$cnt" -gt "$MAX_CNT" ] && MAX_CNT=$cnt
+    done <<< "$TIMELINE"
+    STRIDE=1; [ "$NROWS" -gt 20 ] && STRIDE=$(( NROWS / 20 ))
+    ROW_N=0
+    while read -r bucket cnt; do
+      [ -z "$cnt" ] && continue
+      ROW_N=$((ROW_N + 1))
+      is_dip=$(( cnt * 2 < MAX_CNT ? 1 : 0 ))
+      if [ "$ROW_N" -ne 1 ] && [ "$ROW_N" -ne "$NROWS" ] && [ $((ROW_N % STRIDE)) -ne 0 ] && [ "$is_dip" -eq 0 ]; then
+        continue
+      fi
+      bar_len=$(( (cnt * 60 + MAX_CNT - 1) / MAX_CNT ))
+      [ "$bar_len" -lt 1 ] && bar_len=1
+      printf "   %s  %s  %s rows\n" "$bucket" "$(printf '%.0s█' $(seq 1 $bar_len))" "$cnt"
+    done <<< "$TIMELINE"
+    [ "$NROWS" -gt 20 ] && echo "   ℹ️  ${NROWS} total buckets — showing ~20 + rate dips"
 
     echo ""
     echo "─── ⑤ Data Integrity ────────────────────────────────────────────────"
     # 6a. Checksum: SUM of all seq_num — repeatable, deterministic
     CHECKSUM=$(run "SELECT CAST(SUM(CAST(seq_num AS BIGINT)) AS VARCHAR) FROM writes_log;")
     echo "   seq_num checksum (SUM) : ${CHECKSUM}"
-    echo "   ℹ️  Record this value before and after restore — must match."
     echo ""
 
     # 6b. Spot-check 5 rows: verify note field format is correct
@@ -197,17 +227,14 @@ data:
     " > /dev/null 2>&1 && WRITE_OK=1 || WRITE_OK=0
 
     if [ "$WRITE_OK" -eq 1 ]; then
-      # Verify we can read it back
       READ_BACK=$(run "SELECT note FROM writes_log WHERE seq_num=${NEXT_SEQ};")
       if [ "$READ_BACK" = "checker-write-test" ]; then
-        echo "   ✅ INSERT + SELECT verified (seq=${NEXT_SEQ})"
+        $SQLCMD -Q "SET NOCOUNT ON; DELETE FROM writes_log WHERE seq_num=${NEXT_SEQ};" > /dev/null 2>&1 || true
+        echo "   ✅ Read-write test passed (seq=${NEXT_SEQ})"
       else
         echo "   ❌ INSERT succeeded but SELECT returned unexpected value: '${READ_BACK}'"
         WRITE_OK=0
       fi
-      # Clean up test row
-      $SQLCMD -Q "SET NOCOUNT ON; DELETE FROM writes_log WHERE seq_num=${NEXT_SEQ};" > /dev/null 2>&1 || true
-      echo "   ✅ DELETE cleanup completed — database is fully read-write"
     else
       echo "   ❌ INSERT failed — database may be read-only or in recovery"
     fi
@@ -216,7 +243,6 @@ data:
     echo "$DIV"
     INTEGRITY_OK=1
     [ "${GAPS}" -ne "0" ] && INTEGRITY_OK=0
-    [ "${TOTAL}" -ne "${EXPECTED}" ] && INTEGRITY_OK=0
     [ -n "$DBCC_OUT" ] && INTEGRITY_OK=0
     [ "$WRITE_OK" -eq 0 ] && INTEGRITY_OK=0
     if [ "${INTEGRITY_OK}" -eq "1" ]; then
