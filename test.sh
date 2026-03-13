@@ -15,7 +15,8 @@
 #    ./test.sh status              Show pods, writers, backup/restore state
 #    ./test.sh cleanup [db]        Delete workload resources (keep namespace + data at rest)
 #                                    db = postgres|mariadb|mongodb|sqlserver|all (default: all)
-#    ./test.sh nuke                Delete the entire namespace (start fresh)
+#    ./test.sh delete-backups      Delete all Backup CRs and wait for S3/NFS data cleanup
+#    ./test.sh nuke                delete-backups → delete Restores+BackupPlan → delete namespace
 #    ./test.sh full                deploy → backup → wipe sts+pvcs → restore → check (E2E, all 4 DBs)
 #    ./test.sh full [db]           Full E2E for a SINGLE DB using its individual per-DB manifests
 #                                    db = postgres|mariadb|mongodb|sqlserver
@@ -521,17 +522,100 @@ cmd_cleanup() {
   info "Run './test.sh restore' to restore from the last backup."
 }
 
+cmd_delete_backups() {
+  # Deletes all Backup CRs in the namespace and waits for the Trilio operator
+  # to remove the actual data from the Target (S3/NFS) before returning.
+  # Does NOT touch: namespace, pods, PVCs, StatefulSets, BackupPlan, hooks, Restores.
+  div
+  echo -e "${BOLD}  DELETE BACKUPS — namespace: $NS${NC}"
+  div
+
+  local backups
+  backups=$(kubectl get backups.triliovault.trilio.io -n "$NS" \
+    --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
+
+  if [[ -z "$backups" ]]; then
+    info "No backups found in namespace $NS — nothing to delete."
+    div
+    return 0
+  fi
+
+  local count
+  count=$(echo "$backups" | wc -l | tr -d ' ')
+  echo ""
+  echo "  Found $count backup(s):"
+  echo "$backups" | sed 's/^/    • /'
+  echo ""
+  read -r -p "  Delete all $count backup(s) and their S3/NFS data? [y/N] " confirm
+  if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    info "Aborted."
+    return 0
+  fi
+
+  step "Deleting backup CRs (Trilio will clean S3/NFS data)"
+  while IFS= read -r name; do
+    kubectl delete backup.triliovault.trilio.io "$name" -n "$NS" \
+      --ignore-not-found > /dev/null 2>&1 && info "Deleted backup/$name" || true
+  done <<< "$backups"
+
+  step "Waiting for Trilio to finish cleaning backup data from target..."
+  local elapsed=0
+  while true; do
+    local remaining
+    remaining=$(kubectl get backups.triliovault.trilio.io -n "$NS" \
+      --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$remaining" -eq 0 ]]; then
+      pass "All backups deleted — S3/NFS data cleaned up"
+      break
+    fi
+    if (( elapsed >= 600 )); then
+      warn "Timed out after 600s — ${remaining} backup(s) still deleting. Check Trilio operator logs."
+      break
+    fi
+    printf "    %3ds  %s backup(s) still being cleaned up...\r" "$elapsed" "$remaining"
+    sleep 10; (( elapsed += 10 ))
+  done
+
+  div
+  summary
+}
+
 cmd_nuke() {
   div
-  echo -e "${RED}${BOLD}  NUKE — deleting namespace $NS entirely${NC}"
+  echo -e "${RED}${BOLD}  NUKE — delete backups from S3/NFS, then delete namespace $NS${NC}"
   div
-  read -r -p "  Are you sure? This deletes the namespace and all Kubernetes objects (Backup CRs, PVCs, etc.). Backup data already written to the Target (S3/NFS) is NOT deleted. [y/N] " confirm
-  if [[ "$confirm" =~ ^[Yy]$ ]]; then
-    kubectl delete namespace "$NS" --ignore-not-found
-    pass "Namespace $NS deleted"
-  else
+  echo "  This will:"
+  echo "    1. Delete all Backup CRs and wait for S3/NFS data cleanup (via Trilio)"
+  echo "    2. Delete all Restore CRs"
+  echo "    3. Delete the BackupPlan CR"
+  echo "    4. Delete the namespace (pods, PVCs, secrets, everything)"
+  echo ""
+  read -r -p "  Are you sure? [y/N] " confirm
+  if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     info "Aborted."
+    return 0
   fi
+
+  # Step 1: delete backups first so Trilio can clean S3/NFS
+  cmd_delete_backups
+
+  # Step 2: delete Restore CRs (metadata only, no storage impact)
+  step "Deleting Restore CRs"
+  kubectl delete restores.triliovault.trilio.io --all -n "$NS" \
+    --ignore-not-found > /dev/null 2>&1 && pass "Restore CRs deleted" || true
+
+  # Step 3: delete BackupPlan CR
+  step "Deleting BackupPlan CR"
+  kubectl delete backupplans.triliovault.trilio.io --all -n "$NS" \
+    --ignore-not-found > /dev/null 2>&1 && pass "BackupPlan CRs deleted" || true
+
+  # Step 4: delete the namespace
+  step "Deleting namespace $NS"
+  kubectl delete namespace "$NS" --ignore-not-found
+  pass "Namespace $NS deleted"
+
+  div
+  summary
 }
 
 _run_writers() {
@@ -836,6 +920,7 @@ case "$CMD" in
   check)    cmd_check   "$ARG2" ;;
   status)   cmd_status ;;
   cleanup)  cmd_cleanup "$ARG2" ;;
+  delete-backups) cmd_delete_backups ;;
   nuke)     cmd_nuke ;;
   full)     cmd_full "$ARG2" ;;
   cycle)    cmd_cycle ;;
