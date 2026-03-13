@@ -16,9 +16,13 @@
 #    ./test.sh cleanup [db]        Delete workload resources (keep namespace + data at rest)
 #                                    db = postgres|mariadb|mongodb|sqlserver|all (default: all)
 #    ./test.sh nuke                Delete the entire namespace (start fresh)
-#    ./test.sh full                deploy → backup → wipe sts+pvcs → restore → check (E2E)
+#    ./test.sh full                deploy → backup → wipe sts+pvcs → restore → check (E2E, all 4 DBs)
+#    ./test.sh full [db]           Full E2E for a SINGLE DB using its individual per-DB manifests
+#                                    db = postgres|mariadb|mongodb|sqlserver
 #    ./test.sh full --high-pressure
-#                                  Full E2E test with high-pressure writers
+#                                  Full E2E test with high-pressure writers (all 4 DBs)
+#    ./test.sh full [db] --high-pressure
+#                                  Single-DB E2E with high-pressure writer
 #    ./test.sh cycle               delete+restart writers → backup → wipe sts+pvcs → restore → check (skip deploy)
 #    ./test.sh cycle --high-pressure
 #                                  Same but with high-pressure writers
@@ -607,13 +611,163 @@ cmd_cycle() {
 }
 
 cmd_full() {
+  # If a single DB is given, run the per-DB solo path using individual manifests.
+  # Otherwise run the standard all-4-DBs combined path.
+  local target="${1:-all}"
+  if [[ "$target" != "all" ]]; then
+    _cmd_full_solo "$target"
+    return
+  fi
+
   div
-  echo -e "${BOLD}  FULL E2E TEST${NC}"
+  echo -e "${BOLD}  FULL E2E TEST — all 4 databases (combined BackupPlan)${NC}"
   echo -e "  deploy → wait 2min → backup → wait 1min → wipe sts+pvcs → restore → check"
   div
 
   cmd_deploy
   _run_backup_restore_check
+}
+
+# Full E2E for a single DB using its individual per-DB trilio/ manifests.
+# This is the path a customer follows when they deploy just one database.
+# Exercises: deploy → individual hook → individual backupplan → backup → restore → check
+_cmd_full_solo() {
+  local db="$1"
+  [[ ! " ${DBS[*]} " =~ " $db " ]] && die "Unknown database '$db'. Use: postgres|mariadb|mongodb|sqlserver"
+  local dir="$SCRIPT_DIR/$db"
+
+  div
+  echo -e "${BOLD}  FULL SOLO E2E — $db (individual per-DB manifests)${NC}"
+  echo -e "  deploy → individual hook+backupplan → wait 2min → backup → wait 1min → wipe → restore → check"
+  if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
+    echo -e "  Mode: high-pressure"
+  fi
+  div
+
+  step "Namespace"
+  kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - > /dev/null 2>&1
+  pass "Namespace $NS ready"
+
+  # SQL Server requires anyuid SCC on OpenShift
+  if [[ "$db" == "sqlserver" ]]; then
+    step "SQL Server SCC (OpenShift anyuid via RoleBinding)"
+    kubectl apply -f "$dir/deploy/00a-serviceaccount.yaml" -n "$NS" > /dev/null 2>&1
+    if kubectl apply -f "$dir/deploy/00b-scc-rolebinding.yaml" -n "$NS" > /dev/null 2>&1; then
+      pass "anyuid SCC RoleBinding applied for sqlserver ServiceAccount"
+    else
+      warn "Could not apply anyuid SCC RoleBinding — SQL Server may fail on OpenShift"
+    fi
+  fi
+
+  step "Deploy: $db"
+  for f in $(ls "$dir/deploy/"*.yaml 2>/dev/null | sort); do
+    kapply "$f"
+  done
+  wait_sts_ready "$db" || true
+
+  step "Deploy writer: $db"
+  kubectl delete job "${db}-writer" -n "$NS" --ignore-not-found > /dev/null 2>&1
+  if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
+    kapply_db "$db" "$dir/writer/writer-configmap-highpressure.yaml"
+    kapply_db "$db" "$dir/writer/writer-job-highpressure.yaml"
+  else
+    kapply_db "$db" "$dir/writer/writer-configmap.yaml"
+    kapply_db "$db" "$dir/writer/writer-job.yaml"
+  fi
+
+  step "Deploy Trilio hook + BackupPlan (individual)"
+  kapply_db "$db" "$dir/trilio/hook.yaml"
+  kapply_db "$db" "$dir/trilio/backupplan.yaml"
+
+  # SQL Server: wait until demodb has at least 100 rows before backing up
+  if [[ "$db" == "sqlserver" ]]; then
+    local ss_pass ss_rows ss_wait=0
+    ss_pass=$(kubectl get secret sqlserver-secret -n "$NS" \
+      -o jsonpath='{.data.SA_PASSWORD}' 2>/dev/null | base64 -d || echo "")
+    if [[ -n "$ss_pass" ]]; then
+      info "Waiting for sqlserver to have rows before backup..."
+      while true; do
+        ss_rows=$(kubectl exec -n "$NS" sqlserver-0 -- \
+          /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "${ss_pass}" \
+          -No -d demodb -h -1 -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM writes_log" 2>/dev/null \
+          | tr -d '[:space:]' || echo "0")
+        if [[ "${ss_rows:-0}" -ge 100 ]]; then
+          pass "sqlserver has ${ss_rows} rows — ready for backup"
+          break
+        fi
+        ss_wait=$((ss_wait + 10))
+        if [[ "$ss_wait" -ge 300 ]]; then
+          warn "sqlserver has only ${ss_rows:-0} rows after ${ss_wait}s — proceeding anyway"
+          break
+        fi
+        printf "    sqlserver rows: %s — waiting...\r" "${ss_rows:-0}"
+        sleep 10
+      done
+      echo ""
+    fi
+  fi
+
+  step "Letting writer run for 2 minutes before backup"
+  for i in $(seq 120 -10 10); do printf "  %3ds remaining...\r" "$i"; sleep 10; done
+  echo ""
+
+  # Create backup using the individual backup.yaml
+  local backup_name
+  backup_name=$(grep '^  name:' "$dir/trilio/backup.yaml" | head -1 | awk '{print $2}')
+  step "Creating backup: $backup_name"
+  kubectl delete backup "$backup_name" -n "$NS" --ignore-not-found > /dev/null 2>&1
+  sleep 2
+  kubectl apply -f "$dir/trilio/backup.yaml" -n "$NS" > /dev/null
+  pass "Applied backup $backup_name"
+  wait_tvk backup "$backup_name" "$TIMEOUT_BACKUP" "Available" || true
+
+  step "Letting writer continue for 1 minute post-backup"
+  for i in $(seq 60 -10 10); do printf "  %3ds remaining...\r" "$i"; sleep 10; done
+  echo ""
+
+  step "Wiping $db workload (simulating disaster)"
+  _cleanup_db "$db"
+
+  # Restore using the individual restore.yaml
+  local restore_name
+  restore_name=$(grep '^  name:' "$dir/trilio/restore.yaml" | head -1 | awk '{print $2}')
+  step "Restoring: $restore_name (individual restore.yaml)"
+  kubectl delete restore "$restore_name" -n "$NS" --ignore-not-found > /dev/null 2>&1
+  sleep 2
+  kubectl apply -f "$dir/trilio/restore.yaml" -n "$NS" > /dev/null
+  pass "Applied restore $restore_name"
+  wait_tvk restore "$restore_name" "$TIMEOUT_RESTORE" "Completed" || true
+
+  step "Waiting for StatefulSet to recover"
+  wait_sts_ready "$db" || true
+
+  step "Running consistency checker"
+  kubectl delete job "${db}-consistency-checker" -n "$NS" --ignore-not-found > /dev/null 2>&1
+  sleep 1
+  kapply_db "$db" "$dir/checker/checker-configmap.yaml"
+  kapply_db "$db" "$dir/checker/consistency-checker-job.yaml"
+
+  local rc=0
+  printf "  Waiting for %s-consistency-checker..." "$db"
+  wait_job "${db}-consistency-checker" "$TIMEOUT_CHECK" || rc=$?
+  echo ""
+
+  echo ""
+  echo -e "${BOLD}  ┌── $db ────────────────────────────────────────────────────${NC}"
+  kubectl logs "job/${db}-consistency-checker" -n "$NS" 2>/dev/null \
+    | sed 's/^/  │  /' || echo "  │  (no logs)"
+  echo -e "${BOLD}  └──────────────────────────────────────────────────────────────${NC}"
+
+  if [[ $rc -eq 0 ]]; then
+    pass "$db solo E2E — PASSED"
+  elif [[ $rc -eq 1 ]]; then
+    fail "$db solo E2E — FAILED (checker reported failure)"
+  else
+    fail "$db solo E2E — TIMEOUT after ${TIMEOUT_CHECK}s"
+  fi
+
+  div
+  summary
 }
 
 # ── Internal: delete one DB's workload resources ──────────────────────────────
@@ -683,7 +837,7 @@ case "$CMD" in
   status)   cmd_status ;;
   cleanup)  cmd_cleanup "$ARG2" ;;
   nuke)     cmd_nuke ;;
-  full)     cmd_full ;;
+  full)     cmd_full "$ARG2" ;;
   cycle)    cmd_cycle ;;
   help|--help|-h)
     sed -n '/^#  Usage:/,/^# ━/p' "$0" | head -25

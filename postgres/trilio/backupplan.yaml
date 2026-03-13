@@ -7,8 +7,8 @@ spec:
     # ─── TARGET ─────────────────────────────────────────────────────────────
     # Adapt name and namespace to match your pre-configured Trilio for Kubernetes Target.
     target:
-      name: <YOUR_TARGET_NAME>       # ← replace with your Target CR name
-      namespace: <YOUR_TARGET_NS>    # ← replace with your Target CR namespace
+      name: demo-nfs-target       # ← replace with your Target CR name
+      namespace: trilio-system    # ← replace with your Target CR namespace
 
   # ─── HOOK CONFIGURATION ─────────────────────────────────────────────────
   # hookConfig is a top-level spec field, NOT nested under backupConfig.

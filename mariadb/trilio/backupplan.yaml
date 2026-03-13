@@ -5,8 +5,8 @@ metadata:
 spec:
   backupConfig:
     target:
-      name: <YOUR_TARGET_NAME>       # ← replace with your Target CR name
-      namespace: <YOUR_TARGET_NS>    # ← replace with your Target CR namespace
+      name: demo-nfs-target       # ← replace with your Target CR name
+      namespace: trilio-system    # ← replace with your Target CR namespace
   hookConfig:
     mode: Sequential
     hooks:
