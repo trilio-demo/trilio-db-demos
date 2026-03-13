@@ -2,13 +2,12 @@ apiVersion: triliovault.trilio.io/v1
 kind: Restore
 metadata:
   name: mongodb-inplace-restore
-  namespace: trilio-demo
+  namespace: trilio-demo   # ← replace with your namespace if different
 spec:
   source:
     type: Backup
     backup:
       name: mongodb-demo-backup
-      namespace: trilio-demo
-  cleanupConfig:
-    enabled: true
-    gracefulDeletionTimeoutSeconds: 120
+      namespace: trilio-demo   # ← replace with your namespace if different
+  restoreFlags:
+    skipIfAlreadyExists: true
