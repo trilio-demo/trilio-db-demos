@@ -212,12 +212,16 @@ postgres/
 │   ├── 01-statefulset.yaml     PostgreSQL 17 StatefulSet with 5Gi PVC
 │   └── 02-service.yaml         Headless + ClusterIP services
 ├── writer/
-│   ├── writer-configmap.yaml   Bash writer script
-│   └── writer-deployment.yaml  Deployment running the writer
+│   ├── writer-configmap.yaml               Standard writer script (Python, 1 row/sec, 10k rows)
+│   ├── writer-configmap-highpressure.yaml  High-pressure writer script (Python+pip, batch=10, 50k rows)
+│   ├── writer-job.yaml                     Job manifest (standard)
+│   └── writer-job-highpressure.yaml        Job manifest (high-pressure)
 ├── checker/
-│   └── consistency-checker-job.yaml  Post-restore gap verifier
+│   ├── checker-configmap.yaml              Checker script (gap check, latency, timeline)
+│   └── consistency-checker-job.yaml        Job manifest
 └── trilio/
     ├── hook.yaml               Trilio for Kubernetes Hook CR (pre: CHECKPOINT, post: pg_switch_wal)
     ├── backupplan.yaml         BackupPlan CR (edit target name/namespace)
-    └── backup.yaml             Backup CR (trigger a backup)
+    ├── backup.yaml             Backup CR (trigger a backup)
+    └── restore.yaml            Restore CR for individual DB in-place restore
 ```

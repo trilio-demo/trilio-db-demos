@@ -47,12 +47,12 @@ Each database has two writer configmaps in its `writer/` folder:
 | File | Mode | Rate | Rows | Duration |
 |------|------|------|------|----------|
 | `writer-configmap.yaml` | Standard | 1 row/sec | 10,000 | ~2.7h |
-| `writer-configmap-highpressure.yaml` | High-pressure | 10 rows/sec | 50,000 | ~83 min |
+| `writer-configmap-highpressure.yaml` | High-pressure | ~100 rows/sec (postgres/mariadb/mongodb: Python+pip batch=10; sqlserver: bash+sqlcmd batches of 50, no rate cap) | 50,000 | ~8 min |
 
 Pass `--high-pressure` to `deploy` or `full` to use the stress writers:
 
 ```bash
-# High-pressure: 10 rows/sec — stresses the hook under realistic I/O load
+# High-pressure: ~100 rows/sec — stresses the hook under high I/O load
 ./test.sh deploy --high-pressure
 ./test.sh full --high-pressure
 

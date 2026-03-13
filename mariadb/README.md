@@ -158,13 +158,16 @@ mariadb/
 │   ├── 01-statefulset.yaml     MariaDB 11.4 LTS with 5Gi PVC
 │   └── 02-service.yaml
 ├── writer/
-│   ├── writer-configmap.yaml
-│   └── writer-job.yaml
+│   ├── writer-configmap.yaml               Standard writer script (Python, 1 row/sec, 10k rows)
+│   ├── writer-configmap-highpressure.yaml  High-pressure writer script (Python+pip, batch=10, 50k rows)
+│   ├── writer-job.yaml                     Job manifest (standard)
+│   └── writer-job-highpressure.yaml        Job manifest (high-pressure)
 ├── checker/
-│   ├── checker-configmap.yaml
-│   └── consistency-checker-job.yaml
+│   ├── checker-configmap.yaml              Checker script (gap check, latency, timeline)
+│   └── consistency-checker-job.yaml        Job manifest
 └── trilio/
     ├── hook.yaml               pre: FLUSH TABLES + FLUSH BINARY LOGS
     ├── backupplan.yaml         (edit target name/namespace)
-    └── backup.yaml
+    ├── backup.yaml
+    └── restore.yaml            Restore CR for individual DB in-place restore
 ```

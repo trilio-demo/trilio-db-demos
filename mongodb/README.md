@@ -165,12 +165,16 @@ mongodb/
 │   ├── 01-statefulset.yaml     MongoDB 8.0 with 5Gi PVC
 │   └── 02-service.yaml
 ├── writer/
-│   ├── writer-configmap.yaml
-│   └── writer-deployment.yaml
+│   ├── writer-configmap.yaml               Standard writer script (Python, 1 row/sec, 10k rows)
+│   ├── writer-configmap-highpressure.yaml  High-pressure writer script (Python+pip, batch=10, 50k rows)
+│   ├── writer-job.yaml                     Job manifest (standard)
+│   └── writer-job-highpressure.yaml        Job manifest (high-pressure)
 ├── checker/
-│   └── consistency-checker-job.yaml
+│   ├── checker-configmap.yaml              Checker script (gap check, latency, timeline)
+│   └── consistency-checker-job.yaml        Job manifest
 └── trilio/
     ├── hook.yaml               pre: fsyncLock, post: fsyncUnlock
     ├── backupplan.yaml         (edit target name/namespace)
-    └── backup.yaml
+    ├── backup.yaml
+    └── restore.yaml            Restore CR for individual DB in-place restore
 ```
