@@ -67,7 +67,51 @@ trilio-db-demos/
 
 ---
 
-## Quick Start (PostgreSQL example)
+## Quick Start — `test.sh`
+
+`test.sh` at the repo root is the primary entry point. It automates the full workflow — deploy, backup, restore, and verify — for any single database or all four at once.
+
+```bash
+# Prerequisites:
+# 1. Edit the target name/namespace in backupplan.yaml for the DB(s) you want to test
+# 2. Have kubectl/oc configured for your cluster
+
+# Test a single database end-to-end (postgres | mariadb | mongodb | sqlserver)
+./test.sh full postgres
+
+# Test all 4 databases end-to-end, one at a time
+for db in postgres mariadb mongodb sqlserver; do
+  ./test.sh nuke && ./test.sh full $db
+done
+
+# Test all 4 databases together in a shared namespace (single BackupPlan)
+./test.sh full
+
+# High-pressure mode — stress the hook with ~100 rows/sec batch writes
+./test.sh full postgres --high-pressure
+./test.sh full --high-pressure
+```
+
+Each `full` run does: deploy → writer → hook + backupplan → backup → wipe STS + PVCs → restore → consistency check. A pass means zero gaps in the write sequence across the backup boundary.
+
+Other useful commands:
+
+```bash
+./test.sh deploy              # deploy all 4 DBs + writers (no backup)
+./test.sh backup              # trigger a backup and wait for Available
+./test.sh restore             # restore and wait for Completed
+./test.sh check               # run consistency checker on all DBs
+./test.sh delete-backups      # safely delete Backup CRs + wait for S3/NFS cleanup
+./test.sh nuke                # delete-backups, then wipe the namespace entirely
+```
+
+See [shared/README.md](./shared/README.md) for the full command reference.
+
+---
+
+## Manual Quick Start (PostgreSQL example)
+
+If you prefer to apply manifests by hand rather than using `test.sh`:
 
 ```bash
 # 1. Create a namespace
@@ -75,33 +119,32 @@ kubectl create namespace trilio-demo
 
 # 2. Deploy the database
 kubectl apply -f postgres/deploy/ -n trilio-demo
-
-# 3. Wait for the database to be ready (~30s)
 kubectl rollout status statefulset/postgres -n trilio-demo
 
-# 4. Start the writer Job (writes 10,000 rows then exits automatically)
+# 3. Start the writer Job (writes 10,000 rows then exits automatically)
 kubectl apply -f postgres/writer/ -n trilio-demo
-
-# 5. Watch the writes in one terminal (keep this open!)
 kubectl logs -f job/postgres-writer -n trilio-demo
 
-# 6. Apply Trilio for Kubernetes resources (edit target name in backupplan.yaml first)
-#    ⚠️  Apply individually — backup.yaml triggers a backup immediately if applied
+# 4. Apply Trilio resources (edit target name in backupplan.yaml first)
+#    ⚠️  Apply individually — backup.yaml triggers a backup immediately
 kubectl apply -f postgres/trilio/hook.yaml -n trilio-demo
 kubectl apply -f postgres/trilio/backupplan.yaml -n trilio-demo
 
-# 7. Trigger a backup — watch writes continue uninterrupted
+# 5. Trigger a backup — writes continue uninterrupted
 kubectl apply -f postgres/trilio/backup.yaml -n trilio-demo
 kubectl get backup postgres-demo-backup -n trilio-demo -w
 
-# 8. After a restore, verify consistency
+# 6. Simulate disaster and restore
+kubectl delete statefulset postgres -n trilio-demo
+kubectl delete pvc postgres-data-postgres-0 -n trilio-demo
+kubectl apply -f postgres/trilio/restore.yaml -n trilio-demo
+
+# 7. Verify consistency after restore
 kubectl apply -f postgres/checker/ -n trilio-demo
 kubectl logs -f job/postgres-consistency-checker -n trilio-demo
 ```
 
 Repeat the same pattern for `mariadb/`, `mongodb/`, or `sqlserver/`.
-
-> **Shared namespace (recommended):** `test.sh` at the repo root automates the full workflow — deploy, backup, restore, and check all 4 databases in a single namespace with one command. See [shared/README.md](./shared/README.md) for the quickest path.
 
 ---
 
