@@ -8,14 +8,14 @@ This file documents the exact environment in which v1.0.0 of this demo repo was 
 
 | Property | Value |
 |---|---|
-| Platform | OpenShift <!-- e.g. OpenShift 4.17, EKS 1.31, GKE 1.30, vanilla k8s 1.29 --> |
-| Kubernetes version | <!-- e.g. v1.29.x --> |
-| Node count | <!-- e.g. 3 workers --> |
-| Node size | <!-- e.g. m5.2xlarge, 8 vCPU / 32 GB RAM --> |
-| CNI | <!-- e.g. OVN-Kubernetes, Calico --> |
-| CSI driver | <!-- e.g. ebs.csi.aws.com, disk.csi.azure.com, rbd.csi.ceph.com --> |
-| VolumeSnapshotClass | <!-- name of the VSC used --> |
-| Storage class | <!-- e.g. gp3-csi, standard-rwo --> |
+| Platform | Red Hat OpenShift 4.20.14 (channel: fast-4.20) |
+| Kubernetes version | v1.33.6 |
+| Masters | 3 × 8 vCPU / 32 GB RAM — RHEL CoreOS 9.6 |
+| Workers | 4 × 16 vCPU / 64 GB RAM — RHEL CoreOS 9.6 |
+| CNI | OVN-Kubernetes |
+| CSI driver | `openshift-storage.rbd.csi.ceph.com` (Red Hat ODF / Ceph RBD) |
+| VolumeSnapshotClass | `ocs-storagecluster-rbdplugin-snapclass` |
+| Storage class | `ocs-storagecluster-ceph-rbd` (default) |
 
 ---
 
@@ -23,11 +23,11 @@ This file documents the exact environment in which v1.0.0 of this demo repo was 
 
 | Property | Value |
 |---|---|
-| TVK version | <!-- e.g. 3.0.0 --> |
-| Install method | <!-- Helm / OLM / OperatorHub --> |
-| Target type | NFS <!-- S3 / NFS --> |
-| Target name | <!-- e.g. demo-nfs-target --> |
-| S3 / NFS endpoint | <!-- masked, just the type: MinIO on-cluster / AWS S3 / NFS server --> |
+| TVK version | 5.3.0 |
+| Install method | OperatorHub (OLM) — channel `stable` |
+| Target type | NFS |
+| Target name | `demo-nfs-target` |
+| S3 / NFS endpoint | On-cluster NFS server |
 
 ---
 
@@ -46,9 +46,8 @@ This file documents the exact environment in which v1.0.0 of this demo repo was 
 
 | Tool | Version | Notes |
 |---|---|---|
-| `kubectl` | <!-- e.g. v1.29.x --> | Used for all manifest applies and polling |
-| `oc` | <!-- e.g. 4.17 --> | OpenShift only — required for anyuid SCC RoleBinding |
-| `bash` | <!-- e.g. 5.2.x --> | test.sh runtime |
+| `oc` | 4.19.0 (client) | Used for all manifest applies and polling; doubles as `kubectl` |
+| `bash` | 5.x | test.sh runtime |
 | `bc` | any | Used in test.sh for arithmetic |
 
 ---
