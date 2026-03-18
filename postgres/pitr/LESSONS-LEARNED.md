@@ -141,6 +141,36 @@ kubectl logs postgres-0 -n $DEMO_NS | grep -i "archive\|wal-g\|ERROR"
 
 ---
 
+## 8. Always Specify recovery_target_time — Never Replay All Available WAL
+
+**What happened:** Running `pitr-restore` without a target time caused PostgreSQL to
+replay all available WAL segments from S3. The last archived segment was partially written
+at the moment of the disaster (pod killed mid-write) and archived to S3 incomplete.
+PostgreSQL fetched it, found an invalid checkpoint record, and panicked:
+
+```
+LOG:  restored log file "000000010000000000000014" from archive
+PANIC:  could not locate a valid checkpoint record at 0/14000028
+```
+
+The pod entered CrashLoopBackOff. Recovery requires removing the corrupt segment from S3
+and re-running the restore from scratch.
+
+**Fix:** Always provide an explicit `recovery_target_time` set to a known good point
+**before** the disaster — typically a few seconds after the last confirmed good write:
+
+```bash
+./test.sh pitr-restore postgres "2026-03-18 18:22:45"
+```
+
+PostgreSQL stops replaying when it reaches that timestamp and never attempts to read
+the corrupt final segment.
+
+**Rule of thumb:** The last WAL segment at the time of a disaster is always suspect.
+Use a target time that falls safely within the previous segment's range.
+
+---
+
 ## 7. Internal vs External NooBaa Endpoint
 
 NooBaa exposes two S3 endpoints:
@@ -159,3 +189,154 @@ trust. The ingress router CA requires extracting a separate secret from
 in-cluster, and the CA cert is always available without extra steps.
 
 Set `AWS_S3_FORCE_PATH_STYLE=true` — NooBaa uses path-style S3 URLs, not virtual-hosted.
+
+---
+
+## 9. Full Reset Requires Deleting the WAL Archive — `./test.sh nuke` Is Not Enough
+
+**What happened:** After nuking the namespace and redeploying, the new postgres instance
+started archiving WAL into the same NooBaa bucket alongside segments from the previous
+run. Old WAL segments have conflicting LSN sequences, which can confuse recovery.
+
+**Why:** `./test.sh nuke` deletes the Kubernetes namespace and Trilio Backup CRs. It
+does not touch the NooBaa S3 bucket. WAL segments written by the previous postgres
+instance remain in the bucket.
+
+**Fix:** Delete the OBC before nuking the namespace. When an OBC is deleted, ODF/NooBaa
+purges the provisioned bucket and all its contents.
+
+**This is now fully automated.** `./test.sh nuke` deletes the OBC first, and
+`./test.sh deploy postgres` handles the full PITR setup — OBC, secret, sidecar patch,
+and archiving verification — in one command.
+
+**Clean reset procedure:**
+
+```bash
+./test.sh nuke            # deletes OBC + WAL bucket + Trilio backups + namespace
+./test.sh deploy postgres # redeploys postgres with WAL archiving fully configured and verified
+```
+
+**Rule of thumb:** For any clean PITR test, use `./test.sh nuke` — it handles the OBC
+cleanup. A fresh OBC means a fresh bucket with no ambiguity about which WAL segments
+belong to which postgres instance.
+
+---
+
+## 10. PostgreSQL Must Not Start in Normal Mode After a Trilio Restore
+
+**What happened:** After a Trilio restore, PostgreSQL started normally (no
+`recovery.signal` present), ran crash recovery from the local WAL in the PVC, and wrote
+a new checkpoint. When `pitr-restore` was run afterwards and Phase 2 tried to fetch WAL
+segment 6 from S3, PostgreSQL found an `invalid resource manager ID` at the start of the
+segment and panicked:
+
+```
+PANIC: could not locate a valid checkpoint record at 0/6000028
+```
+
+**Why:** The normal startup checkpoint advanced the WAL timeline. The WAL segments in S3
+were archived against the original timeline; the new local checkpoint was on a diverged
+timeline. The two are incompatible.
+
+**Fix:** Use a Trilio `transformComponents` patch in the Restore CR to set the
+StatefulSet to 0 replicas during restore. PostgreSQL never starts. `pitr-restore` then
+writes `recovery.signal` and `restore_command` directly to the PVC via a short-lived
+debug pod, and scales postgres to 1. PostgreSQL starts exactly once — already in
+recovery mode.
+
+```yaml
+transformComponents:
+  custom:
+    - transformName: scale-down-postgres
+      resources:
+        groupVersionKind:
+          group: apps
+          kind: StatefulSet
+          version: v1
+        objects:
+          - postgres
+      jsonPatches:
+        - op: replace
+          path: /spec/replicas
+          value: 0
+```
+
+**Rule of thumb:** For PITR, the restore and the recovery configuration are a single
+atomic operation. Never let postgres start between them.
+
+---
+
+## 11. Write Recovery Config to the PVC via a Debug Pod, Not kubectl exec
+
+**What happened:** The original `pitr-restore` implementation used `kubectl exec` to
+write `recovery.signal` and `restore_command` into a running postgres container, then
+did a rollout restart. This failed because:
+
+1. After restart, the init containers re-ran and the `postgres-pitr-init` init container
+   overwrote `postgresql.conf` entries
+2. If the pod was crashlooping (from a previous failed attempt), `kubectl exec` could
+   not reach it
+
+**Fix:** With postgres at 0 replicas (from the restore transform), spin up a temporary
+`postgres:17` debug pod that mounts the same PVC and writes directly to `$PGDATA`:
+
+```bash
+kubectl run pitr-config-writer -n $DEMO_NS --image=postgres:17 --restart=Never \
+  --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":
+    {"claimName":"postgres-data-postgres-0"}}],"containers":[{"name":"writer",
+    "image":"postgres:17","command":["sleep","120"],
+    "volumeMounts":[{"name":"data","mountPath":"/var/lib/postgresql/data"}]}]}}'
+
+kubectl exec pitr-config-writer -n $DEMO_NS -- bash -c "
+  sed -i '/^restore_command/d; /^recovery_target/d' \$PGDATA/postgresql.conf
+  echo \"restore_command = '/wal-g/wal-g wal-fetch %f %p'\" >> \$PGDATA/postgresql.conf
+  echo \"recovery_target_time = '2026-03-18 20:39:32+00'\" >> \$PGDATA/postgresql.conf
+  echo \"recovery_target_action = 'promote'\" >> \$PGDATA/postgresql.conf
+  touch \$PGDATA/recovery.signal
+"
+kubectl delete pod pitr-config-writer -n $DEMO_NS
+```
+
+Then scale postgres to 1. All of this is automated by `./test.sh pitr-restore`.
+
+**Rule of thumb:** When you need to modify `$PGDATA` and the StatefulSet is at 0
+replicas, a debug pod mounting the PVC is the correct tool — not a rollout restart.
+
+---
+
+## 12. The Debug Pod Pattern — Direct PVC Access Without a Running StatefulSet
+
+When a StatefulSet is scaled to 0, there is no pod to `kubectl exec` into. But the PVC
+still exists and its data is intact. A temporary debug pod mounting the PVC provides
+full shell access to `$PGDATA` without starting the application.
+
+**General pattern:**
+
+```bash
+kubectl run pgdebug -n $DEMO_NS --image=postgres:17 --restart=Never \
+  --overrides='{
+    "spec": {
+      "volumes": [{"name":"data","persistentVolumeClaim":{"claimName":"postgres-data-postgres-0"}}],
+      "containers": [{"name":"debug","image":"postgres:17","command":["sleep","300"],
+        "volumeMounts":[{"name":"data","mountPath":"/var/lib/postgresql/data"}]}]
+    }
+  }'
+
+kubectl wait --for=condition=Ready pod/pgdebug -n $DEMO_NS --timeout=60s
+kubectl exec pgdebug -n $DEMO_NS -- bash   # interactive shell into $PGDATA
+kubectl delete pod pgdebug -n $DEMO_NS
+```
+
+**Use the same image as the StatefulSet** (`postgres:17`) — file ownership and
+permissions on the PVC match that UID. A different image may hit permission errors.
+
+**Useful for:**
+- Inspecting or editing `postgresql.conf` / `pg_hba.conf`
+- Creating or removing `recovery.signal`
+- Reading postgres logs from a crashed pod (`$PGDATA/log/`)
+- Removing corrupt WAL segments from `pg_wal/`
+- Any situation where the pod is crashlooping too fast to `kubectl exec` into
+
+**On OpenShift:** the pod may land on a node that applies a different UID via SCC. If
+you hit permission errors, add `"securityContext":{"runAsUser":999}` to the overrides
+(999 is the postgres user UID in the official image).

@@ -219,9 +219,17 @@ postgres/
 ├── checker/
 │   ├── checker-configmap.yaml              Checker script (gap check, latency, timeline)
 │   └── consistency-checker-job.yaml        Job manifest
-└── trilio/
-    ├── hook.yaml               Trilio for Kubernetes Hook CR (pre: CHECKPOINT, post: pg_switch_wal)
-    ├── backupplan.yaml         BackupPlan CR (edit target name/namespace)
-    ├── backup.yaml             Backup CR (trigger a backup)
-    └── restore.yaml            Restore CR for individual DB in-place restore
+├── trilio/
+│   ├── hook.yaml               Trilio Hook CR (pre: CHECKPOINT, post: pg_switch_wal)
+│   ├── backupplan.yaml         BackupPlan CR
+│   ├── backup.yaml             Backup CR
+│   ├── restore.yaml            Restore CR — includes scale-down transform for PITR
+│   └── restore-hook.yaml       Hook CR for post-restore audit log (reserved for non-PITR restores)
+└── pitr/
+    ├── 01-obc.yaml                         ObjectBucketClaim for WAL archive bucket
+    ├── 02-walg-secret.sh                   Creates walg-config secret from OBC credentials
+    ├── walg-sidecar-statefulset-patch.yaml WAL-G init container patch for StatefulSet
+    ├── README.md                           Setup and recovery procedure
+    ├── Overview-pitr.md                    Customer-facing architecture document
+    └── LESSONS-LEARNED.md                  Operational findings from OCP 4.20 / ODF testing
 ```

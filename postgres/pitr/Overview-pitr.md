@@ -28,12 +28,13 @@ a WAL segment file before being applied to the data files. When archiving is ena
 PostgreSQL calls an `archive_command` for every completed segment:
 
 ```
-archive_command = 'wal-g wal-push %p'
+archive_command = '/wal-g/wal-g wal-push %p'
 ```
 
 [WAL-G](https://github.com/wal-g/wal-g) is the open source tool that handles compression
-and upload to S3-compatible object storage (AWS S3, MinIO, Ceph/NooBaa, etc.). It runs
-as a sidecar container alongside PostgreSQL, requiring no changes to the database itself.
+and upload to S3-compatible object storage (AWS S3, MinIO, Ceph/NooBaa, etc.). The binary
+is downloaded at pod startup by an init container and placed on a shared volume, requiring
+no changes to the base PostgreSQL image.
 
 ```
 PostgreSQL container
@@ -68,20 +69,25 @@ Trilio snapshot                                    Target time
 **Phase 1 — Trilio restores the base**
 
 Trilio recreates the PVC from the volume snapshot and restores all Kubernetes resources
-(StatefulSet, Services, Secrets, ConfigMaps) in a single operation. When the PostgreSQL
-pod starts, it enters crash recovery and replays the WAL segments that were captured
-inside the snapshot. This brings the database to the exact consistent state it was in
-at snapshot time — automatically, with no intervention required.
+(StatefulSet, Services, Secrets, ConfigMaps) in a single operation.
+
+**Critical:** The Trilio Restore CR uses a `transformComponents` patch to set the
+StatefulSet to 0 replicas during restore. This prevents PostgreSQL from starting in
+normal mode before recovery configuration is in place. If PostgreSQL were allowed to
+start normally after restore it would write a new checkpoint, contaminating the WAL
+timeline and making Phase 2 impossible.
 
 **Phase 2 — PostgreSQL replays WAL from S3**
 
-With a `recovery.signal` file present in `$PGDATA` and `restore_command` configured,
-PostgreSQL does not stop at the end of the local WAL. It calls WAL-G to fetch the next
-segment from S3, then the next, replaying transactions until it reaches the
-`recovery_target_time` you specify. It then promotes to a primary and removes the
-`recovery.signal` file automatically.
+`./test.sh pitr-restore` injects `recovery.signal` and `restore_command` directly into
+`$PGDATA` via a short-lived debug pod while postgres is still at 0 replicas. It then
+scales postgres to 1. PostgreSQL starts for the first time post-restore already in
+recovery mode: it runs Phase 1 crash recovery from local WAL, then seamlessly continues
+to Phase 2, fetching segments from S3 via WAL-G until it reaches the
+`recovery_target_time`. It then promotes to a primary and removes `recovery.signal`
+automatically.
 
-**Trilio's job ends when the pod is running. PostgreSQL handles everything after that.**
+**PostgreSQL starts exactly once after a restore — directly in recovery mode.**
 
 ---
 
@@ -131,17 +137,21 @@ Snapshot taken at T
 │  ┌──────────────────────────────────┐                       │
 │  │  postgres StatefulSet pod        │                       │
 │  │                                  │                       │
-│  │  ┌─────────────┐  ┌───────────┐  │                       │
-│  │  │ postgres:17 │  │  wal-g    │  │                       │
-│  │  │             │  │  sidecar  │  │                       │
-│  │  │ archive_cmd─┼──► wal-push ─┼──┼──► ODF/NooBaa S3     │
-│  │  └─────────────┘  └───────────┘  │      /postgres/wal/  │
+│  │  init: walg-install              │                       │
+│  │  init: postgres-pitr-init        │                       │
+│  │                                  │                       │
+│  │  ┌─────────────┐                 │                       │
+│  │  │ postgres:17 │                 │                       │
+│  │  │             │                 │                       │
+│  │  │ archive_cmd─┼─/wal-g/wal-g───┼──► ODF/NooBaa S3     │
+│  │  └─────────────┘  (emptyDir)    │      /postgres/wal/  │
 │  │         │                        │                       │
 │  │    5Gi PVC (WAL + data files)     │                       │
 │  └──────────────────────────────────┘                       │
 │                                                             │
 │  Trilio for Kubernetes                                      │
-│    Hook: CHECKPOINT → snapshot PVC → pg_switch_wal()        │
+│    Backup hook: CHECKPOINT → snapshot PVC → pg_switch_wal() │
+│    Restore transform: StatefulSet replicas → 0              │
 │    Target: NFS (snapshot storage)                           │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
@@ -149,14 +159,105 @@ Snapshot taken at T
 
 ---
 
+## WAL-G Deployment: Sidecar vs Init Container
+
+This implementation uses an **init container** to deliver the WAL-G binary. A sidecar
+is equally valid and arguably more correct architecturally. The choice here was pragmatic:
+the published WAL-G container image tags did not exist at the time of implementation
+(`ghcr.io/wal-g/wal-g:v3.0.3-pg17` returned 404), so an init container downloading the
+binary from GitHub releases was used instead.
+
+### Init Container (this implementation)
+
+```
+┌─ Pod startup ──────────────────────────────────────────────────┐
+│  init: walg-install                                            │
+│    wget wal-g binary from GitHub releases → /shared/wal-g      │
+│  init: postgres-pitr-init                                      │
+│    writes conf.d/pitr.conf (archive_mode, archive_command)     │
+│  container: postgres                                           │
+│    archive_command = '/wal-g/wal-g wal-push %p'               │
+│    (binary on shared emptyDir, available at container start)   │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### Sidecar Container (alternative)
+
+The sidecar pattern runs WAL-G as a long-lived container alongside postgres. The binary
+is shared to the postgres container via an emptyDir volume (same mechanism as above, but
+delivered by a running sidecar rather than a one-shot init container). A more advanced
+variant has the sidecar monitor `pg_wal/` directly and ship segments independently of
+`archive_command`.
+
+```
+┌─ Pod ──────────────────────────────────────────────────────────┐
+│  container: postgres                                           │
+│    archive_command = '/wal-g/wal-g wal-push %p'               │
+│                                                                │
+│  container: wal-g-sidecar                                      │
+│    image: <custom or official wal-g image>                     │
+│    shares /wal-g emptyDir with postgres                        │
+│    can provide: health probes, log streaming, monitoring       │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### Comparison
+
+| | Init Container | Sidecar |
+|---|---|---|
+| **Binary delivery** | One-shot at pod start | Long-running process |
+| **Upgrade WAL-G** | Requires pod restart | Requires pod restart (same PVC) |
+| **Pod complexity** | 1 container running | 2 containers running (2/2) |
+| **Logs** | Mixed into postgres container | Separate container logs |
+| **Health probes** | Not possible | Sidecar can expose liveness probe |
+| **Image requirement** | None — downloads binary at runtime | Requires a working container image |
+| **Kubernetes native sidecars (1.29+)** | N/A | Guaranteed startup order — sidecar starts before main container |
+| **Best for** | Simple setups, no private registry | Production, monitoring, independent lifecycle |
+
+### Using a Sidecar in Practice
+
+To switch to a sidecar, you need a container image that contains the WAL-G binary for
+the correct platform (glibc, not musl). Options:
+
+1. **Build your own** — `FROM postgres:17` + download the binary, push to your registry
+2. **Official image** — check [github.com/wal-g/wal-g](https://github.com/wal-g/wal-g)
+   for current published tags before referencing them
+3. **Kubernetes 1.29+ native sidecar** — use `initContainers` with `restartPolicy: Always`
+   to get a sidecar that starts before the main container and runs for the pod lifetime
+
+The `walg-sidecar-statefulset-patch.yaml` in this repo can be adapted to either pattern
+by changing the init container to a regular container with a persistent run loop.
+
+---
+
 ## Recovery Procedure (Summary)
 
-1. Run `./test.sh restore postgres` — Trilio restores the snapshot (Phase 1 automatic)
-2. Set `recovery_target_time` and create `recovery.signal` in `$PGDATA`
-3. Restart the StatefulSet — PostgreSQL fetches WAL from S3 and replays to target time
-4. Verify with `SELECT pg_is_in_recovery();` — returns `f` when complete
+1. Run `./test.sh restore postgres` — Trilio restores the snapshot with postgres at 0 replicas
+2. Run `./test.sh pitr-restore postgres "<target-time>"` — injects recovery config into
+   the PVC via a debug pod, scales postgres to 1, and waits for promotion
+3. Verify with `SELECT pg_is_in_recovery();` — returns `f` when complete
 
-Steps 2–4 are automated by `./test.sh pitr-restore postgres "<target-time>"`.
+> **Always specify a `recovery_target_time`** — a timestamp safely before the incident,
+> within the range of a fully-archived WAL segment. Do not omit the target time: the last
+> archived WAL segment at the time of a disaster is frequently incomplete, causing
+> PostgreSQL to panic with `could not locate a valid checkpoint record`. Use a timestamp
+> a few seconds after the last known good write, well before the incident.
+
+---
+
+## Choosing a Safe Target Time
+
+After a restore, postgres is at 0 replicas. You cannot query the database directly.
+Use the row timestamps you noted before the incident:
+
+- Note the `MAX(written_at)` from `writes_log` just before the disaster
+- Choose a target time a few seconds **after** a confirmed WAL archive boundary
+- Avoid the most recent WAL segment — it may have been partially written
+
+A WAL segment boundary occurs when:
+- The segment fills to 16 MB (automatic)
+- `archive_timeout = 60` expires (configured in `pitr.conf`)
+- `pg_switch_wal()` is called (done by the Trilio backup hook)
 
 ---
 
@@ -166,9 +267,13 @@ Steps 2–4 are automated by `./test.sh pitr-restore postgres "<target-time>"`.
 |-----------|---------|
 | OpenShift Data Foundation (ODF) | Provides S3-compatible object storage via NooBaa |
 | ObjectBucketClaim | Provisions the WAL archive bucket and credentials |
-| WAL-G init container | Downloads `wal-g` binary at pod startup; placed on shared volume for postgres |
+| WAL-G init container | Downloads `wal-g` binary at pod startup; placed on shared emptyDir volume |
 | walg-config Secret | S3 credentials and endpoint, injected into the postgres container |
 | Trilio for Kubernetes | Snapshot-based backup and restore of the full application |
+
+All prerequisites are provisioned automatically by `./test.sh deploy postgres`.
+
+---
 
 ## TLS Certificate Requirement
 

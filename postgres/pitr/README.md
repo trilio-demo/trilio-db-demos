@@ -1,256 +1,180 @@
-# PostgreSQL — PITR with WAL-G + Trilio for Kubernetes
+# PostgreSQL PITR — WAL-G + Trilio for Kubernetes
 
-> **⚠️ OPTIONAL**: PITR is a complementary capability — not required for T4K backups. Your T4K snapshots work perfectly without it.
+> **Optional capability** — PITR extends Trilio snapshot recovery with near-zero RPO.
+> Standard Trilio backups work without it.
 >
-> **☁️ S3 ONLY**: The archiving mechanisms described here require S3-compatible object storage (AWS S3, MinIO, Ceph, etc.). NFS and filesystem-based T4K targets are **not supported** for WAL/log archiving.
-
-## The Philosophy
-
-Trilio for Kubernetes gives you a **consistent, recoverable snapshot** of your entire Kubernetes application — the database PVC, secrets, services, config — everything needed to restore to a running state. But it is, by nature, a point-in-time event. If you take a backup every 4 hours and the cluster dies 3h59m later, you lose almost 4 hours of data.
-
-WAL archiving fills that gap.
-
-```
- Trilio for Kubernetes Snapshot         Trilio for Kubernetes Snapshot
-        │                            │
-        ▼                            ▼
-────────●────────────────────────────●──────────────── time
-        └──────────── WAL ──────────►└──────── WAL ──►
-                     to S3                   to S3
-
-  RPO without WAL archiving: up to the full backup interval
-  RPO with WAL archiving:    seconds (the last WAL segment flushed to S3)
-```
-
-The strategy is layered:
-
-1. **Trilio for Kubernetes** restores the namespace to a healthy running state (the base).
-2. **WAL-G** replays WAL segments from S3 on top of that base to reach the exact point in time you need.
-
-Neither tool alone is sufficient. Together, they provide enterprise-grade RPO.
+> **Requires S3-compatible object storage** — ODF/NooBaa, AWS S3, MinIO, or Ceph.
+> NFS-only environments cannot use WAL archiving.
 
 ---
 
-## The Tool: WAL-G
+## Quick Start
 
-[WAL-G](https://github.com/wal-g/wal-g) is the de facto standard for PostgreSQL WAL archiving. It runs as a sidecar container alongside PostgreSQL and:
+Everything is automated. Deploy postgres with PITR enabled in a single command:
 
-- Continuously ships WAL segment files to S3 (or GCS, Azure Blob, filesystem)
-- Compresses and optionally encrypts segments before upload
-- Cleans up old segments automatically based on retention policy
-- Takes its own base backups (optional — in our case Trilio for Kubernetes does this)
+```bash
+export DEMO_NS=your-namespace
+./test.sh deploy postgres
+```
 
-The `pg_switch_wal()` call in the Trilio for Kubernetes **post-hook** creates a clean WAL segment boundary at the exact moment of the snapshot, which is the anchor point for WAL replay.
+This provisions the OBC, creates the `walg-config` secret, applies the WAL-G init
+container patch, and verifies archiving is working before returning.
+
+To recover to a point in time after a restore:
+
+```bash
+./test.sh restore postgres
+./test.sh pitr-restore postgres "2026-03-18 20:39:32"
+```
+
+---
+
+## How It Works
+
+See [Overview-pitr.md](Overview-pitr.md) for the full architecture. In brief:
+
+- **Backup**: WAL-G archives PostgreSQL WAL segments continuously to S3. The Trilio
+  backup hook calls `pg_switch_wal()` after the snapshot to create a clean WAL boundary.
+- **Restore**: Trilio restores the PVC and sets postgres to 0 replicas (via a
+  `transformComponents` patch). `pitr-restore` writes `recovery.signal` + `restore_command`
+  directly to `$PGDATA` via a debug pod, then scales postgres to 1. PostgreSQL starts
+  once — directly in recovery mode — replaying local WAL (Phase 1) then S3 WAL (Phase 2).
+
+---
+
+## Files
+
+```
+postgres/pitr/
+├── 01-obc.yaml                         ObjectBucketClaim for WAL archive bucket
+├── 02-walg-secret.sh                   Script to create walg-config secret from OBC credentials
+│                                         (called automatically by ./test.sh deploy postgres)
+├── walg-sidecar-statefulset-patch.yaml Strategic merge patch — adds WAL-G init containers
+│                                         to the postgres StatefulSet
+│   Init containers:
+│     walg-install       downloads wal-g binary from GitHub releases → /wal-g/wal-g
+│     postgres-pitr-init writes archive_mode config to $PGDATA/conf.d/pitr.conf
+│
+├── Overview-pitr.md                    Customer-facing architecture document
+└── LESSONS-LEARNED.md                  Operational findings from testing on OCP 4.20 / ODF
+```
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  postgres StatefulSet pod                            │
-│                                                      │
-│  ┌────────────────┐    ┌────────────────────────┐   │
-│  │   postgres:17  │    │  wal-g sidecar         │   │
-│  │                │    │                        │   │
-│  │  archive_mode  │───►│  wal_archive_command   │──►│──► S3 bucket
-│  │  = on          │    │  = wal-g wal-push %p   │   │    /wal-segments/
-│  └────────────────┘    └────────────────────────┘   │
-│           │                                          │
-│    /var/lib/postgresql/data (shared volume)          │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  OpenShift namespace                                          │
+│                                                              │
+│  ┌───────────────────────────────────┐                       │
+│  │  postgres StatefulSet pod         │                       │
+│  │                                   │                       │
+│  │  init: walg-install               │                       │
+│  │    └─ downloads /wal-g/wal-g      │                       │
+│  │  init: postgres-pitr-init         │                       │
+│  │    └─ writes conf.d/pitr.conf     │                       │
+│  │                                   │                       │
+│  │  container: postgres:17           │                       │
+│  │    archive_command = /wal-g/wal-g wal-push %p             │
+│  │    WALG_S3_CA_CERT_FILE = /etc/ssl/ocp-service-ca/...     │
+│  │         │                         │                       │
+│  │         └──────────────────────────────► NooBaa S3        │
+│  │    5Gi PVC (data + WAL files)     │      /postgres/wal/   │
+│  └───────────────────────────────────┘                       │
+│                                                              │
+│  Trilio for Kubernetes                                       │
+│    Backup hook:  CHECKPOINT → snapshot PVC → pg_switch_wal() │
+│    Restore xfrm: StatefulSet replicas → 0                    │
+│    Target: NFS (snapshot storage)                            │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
 ```
-
-PostgreSQL's `archive_command` calls WAL-G for every completed WAL segment. WAL-G compresses it and uploads to S3. This happens continuously, independent of Trilio for Kubernetes.
 
 ---
 
-## Setup
+## Recovery Procedure
 
-### 1. Prerequisites
-
-- An S3 bucket (or compatible: MinIO, Ceph/NooBaa, etc.) for WAL storage
-- AWS credentials accessible to the pod (IAM role, secret, or IRSA)
-- **On OpenShift with ODF/NooBaa**: use the internal S3 service endpoint and the
-  OCP service CA cert (see TLS note below)
-
-### TLS Certificate Requirement (OpenShift + ODF)
-
-WAL-G strictly verifies TLS certificates. On OpenShift with ODF/NooBaa:
-
-- Use the **internal** S3 endpoint: `https://s3.openshift-storage.svc:443`
-- Set `AWS_S3_FORCE_PATH_STYLE=true` (NooBaa uses path-style URLs)
-- ODF injects its service CA into every namespace as `openshift-service-ca.crt` ConfigMap
-- The patch mounts this ConfigMap and sets `WALG_S3_CA_CERT_FILE` automatically
-
-Do **not** use the external NooBaa route (`s3-openshift-storage.apps.<cluster>`) — it uses
-the ingress router CA which is not the same as the service CA.
-
-Run `postgres/pitr/02-walg-secret.sh` to create the `walg-config` secret automatically
-from the OBC-provisioned credentials. It reads the internal endpoint from the OBC ConfigMap.
-
-### 2. Create the WAL-G configuration secret
-
-On OpenShift with ODF, use the provided script after creating the ObjectBucketClaim:
+### 1. Run restore (postgres stays at 0 replicas)
 
 ```bash
-# Create the OBC first
-kubectl apply -f postgres/pitr/01-obc.yaml
-
-# Wait for Bound state, then create the secret
-./postgres/pitr/02-walg-secret.sh
+./test.sh restore postgres
 ```
 
-For other S3 providers, create the secret manually:
+Trilio restores the PVC. The `transformComponents` patch keeps postgres at 0 replicas —
+it never starts in normal mode, preserving a clean WAL state for Phase 2.
+
+### 2. Run pitr-restore
 
 ```bash
-kubectl create secret generic walg-config \
-  --from-literal=AWS_ACCESS_KEY_ID=<your-key-id> \
-  --from-literal=AWS_SECRET_ACCESS_KEY=<your-secret> \
-  --from-literal=AWS_REGION=<your-region> \
-  --from-literal=AWS_ENDPOINT=<your-s3-endpoint> \
-  --from-literal=AWS_S3_FORCE_PATH_STYLE=true \
-  --from-literal=WALG_S3_PREFIX=s3://<your-bucket>/postgres/wal \
-  -n ${DEMO_NS}
+./test.sh pitr-restore postgres "YYYY-MM-DD HH:MM:SS"
 ```
 
-### 3. Apply the WAL-G sidecar manifest
+Target time is UTC. Use a timestamp a few seconds after the last known good write, safely
+within a confirmed WAL archive boundary — not the most recent segment (may be incomplete).
+
+`pitr-restore` will:
+1. Verify postgres is at 0 replicas (scales down if not)
+2. Re-apply the WAL-G sidecar patch
+3. Ensure `walg-config` secret exists
+4. Spin up a `postgres:17` debug pod to write `recovery.signal` + recovery config to the PVC
+5. Scale postgres to 1
+6. Wait for pod ready and `pg_is_in_recovery() = f`
+7. Write a `restore_log` audit entry
+
+### 3. Verify
 
 ```bash
-kubectl apply -f postgres/pitr/walg-sidecar-statefulset-patch.yaml -n trilio-demo
-```
+kubectl exec postgres-0 -n $DEMO_NS -c postgres -- \
+  psql -U demouser -d demodb \
+  -c "SELECT COUNT(*), MAX(written_at) FROM writes_log;"
 
-This patches the existing StatefulSet to add the WAL-G sidecar and configure PostgreSQL's `archive_command`.
+kubectl exec postgres-0 -n $DEMO_NS -c postgres -- \
+  psql -U demouser -d demodb \
+  -c "SELECT * FROM restore_log ORDER BY restored_at DESC LIMIT 5;"
+```
 
 ---
 
-## Manifests
+## Choosing a Target Time
 
-### `walg-sidecar-statefulset-patch.yaml`
+PostgreSQL panics if asked to replay past the last complete WAL segment. Always choose
+a target time that falls **within a fully-archived segment** — not at or after the last
+one (which may be partial if postgres was killed mid-write).
 
-This is a **strategic merge patch** that adds the WAL-G sidecar to the existing postgres StatefulSet. Apply it with:
+WAL segment boundaries occur when:
+- The segment fills to 16 MB (automatic)
+- `archive_timeout = 60` fires (configured in `pitr.conf`)
+- `pg_switch_wal()` is called by the Trilio backup hook
 
-```bash
-kubectl patch statefulset postgres -n trilio-demo \
-  --patch-file postgres/pitr/walg-sidecar-statefulset-patch.yaml
-```
+A safe target is a timestamp a few seconds **after** a mid-run WAL archive, well before
+the incident.
 
-See the file for the full configuration.
-
-### `postgres-pitr-configmap.yaml`
-
-ConfigMap with the PostgreSQL configuration parameters that enable WAL archiving (`archive_mode`, `archive_command`, `wal_level`).
+> See [LESSONS-LEARNED.md](LESSONS-LEARNED.md) for a full list of operational findings,
+> including the segment corruption issue and the transform approach that solved it.
 
 ---
 
-## How Recovery Works
+## TLS — Internal NooBaa Endpoint
 
-Recovery happens in two phases. Understanding the boundary between them is key.
+WAL-G strictly verifies TLS. Use the internal service endpoint, not the external route:
 
-**Phase 1 — T4K restores the base**
-
-T4K recreates the PVC from the snapshot and starts the pod. PostgreSQL enters crash recovery and replays the WAL files that were captured inside the snapshot. This brings the database to the exact state it was in at snapshot time — no more, no less.
-
-**Phase 2 — WAL-G replays from S3**
-
-If you configure `restore_command`, PostgreSQL doesn't stop at the end of the local WAL. It calls WAL-G to fetch the next WAL segment from S3, then the next, and keeps replaying until it reaches your `recovery_target_time`. This is how you recover past the snapshot point.
-
-```
-T4K snapshot                                  target time
-     │                                              │
-     ▼                                              ▼
-─────●──────────────────────────────────────────────●──── time
-     │◄── Phase 1: local WAL in snapshot ──►│◄─ Phase 2: WAL from S3 ──►│
-     │    (crash recovery, automatic)        │   (wal-g wal-fetch)        │
-```
-
-**The pg_switch_wal() connection**
-
-The post-hook forces a WAL segment boundary at the exact moment of the snapshot. WAL-G archives that segment to S3 immediately. Without this, the segment at snapshot time might sit half-filled for minutes before being archived, creating a gap between Phase 1 and Phase 2 where no WAL is available in S3.
-
-**What you recover**
-
-| Transaction | Where | Recovered? |
+| | Internal (use this) | External (avoid) |
 |---|---|---|
-| Committed before snapshot | Local WAL in PVC | ✅ Phase 1 |
-| Committed after snapshot, before target time | S3 via WAL-G | ✅ Phase 2 |
-| In-flight at snapshot time | No commit record anywhere | ❌ Rolled back |
-| Committed after target time | Intentionally excluded | ❌ By design |
+| URL | `https://s3.openshift-storage.svc:443` | `https://s3-openshift-storage.apps.<cluster>` |
+| CA cert | `openshift-service-ca.crt` ConfigMap (auto-injected) | Ingress router CA (requires manual extraction) |
+
+The sidecar patch mounts `openshift-service-ca.crt` and sets `WALG_S3_CA_CERT_FILE`
+automatically. Set `AWS_S3_FORCE_PATH_STYLE=true` — NooBaa uses path-style S3 URLs.
 
 ---
 
-## PITR Recovery Procedure
-
-After a Trilio for Kubernetes restore, PostgreSQL will start with the state from the snapshot. To replay WAL forward to a specific point:
-
-### Step 1 — Identify the target time
+## Clean Reset
 
 ```bash
-# The restore target timestamp (UTC)
-TARGET_TIME="2026-02-27 14:35:00"
+./test.sh nuke            # deletes OBC (purges WAL bucket) + Trilio backups + namespace
+./test.sh deploy postgres # redeploys with fresh WAL archive and archiving verified
 ```
 
-### Step 2 — Create a recovery configuration
-
-After the Trilio for Kubernetes restore completes, exec into the postgres pod and create a `recovery.signal` file plus configure `restore_command`:
-
-```bash
-kubectl exec -it postgres-0 -n trilio-demo -- bash
-
-# Inside the pod:
-cat >> $PGDATA/postgresql.conf << 'EOF'
-restore_command = 'wal-g wal-fetch %f %p'
-recovery_target_time = '2026-02-27 14:35:00+00'
-recovery_target_action = 'promote'
-EOF
-
-touch $PGDATA/recovery.signal
-```
-
-### Step 3 — Restart PostgreSQL
-
-```bash
-kubectl rollout restart statefulset/postgres -n trilio-demo
-```
-
-PostgreSQL will start in recovery mode, fetch WAL segments from S3 via WAL-G, replay them up to the target time, and promote to primary. The `recovery.signal` file is automatically removed when recovery completes.
-
-### Step 4 — Verify
-
-```bash
-# Run the consistency checker to confirm data integrity
-kubectl apply -f postgres/checker/ -n trilio-demo
-kubectl logs -f job/postgres-consistency-checker -n trilio-demo
-
-# Also check the recovery was complete
-kubectl exec -it postgres-0 -n trilio-demo -- \
-  psql -U demouser -d demodb -c "SELECT pg_is_in_recovery();"
-# Should return: f (false = primary, recovery complete)
-```
-
----
-
-## Connection to the Trilio for Kubernetes Hook
-
-The `pg_switch_wal()` call in the Trilio for Kubernetes post-hook is not just cosmetic — it creates the WAL segment that acts as the **anchor** for PITR:
-
-```
-Trilio for Kubernetes snapshot taken at T
-  │
-  └── pg_switch_wal() forces a new WAL segment at T
-        │
-        └── WAL-G archives segment ending at T to S3
-              │
-              └── PITR can replay from T forward with no gaps
-```
-
-Without `pg_switch_wal()`, the snapshot might end mid-WAL-segment. The segment would not be shipped to S3 until it fills up naturally (default: 16 MB), creating a gap between the snapshot and the first available WAL in S3.
-
----
-
-## Production Notes
-
-- **Retention**: WAL-G respects a retention policy. Configure `WALG_RETAIN_EXTRAPOLATED_WAL_SEGMENTS` and prune with `wal-g delete retain FULL 7` (keep 7 days).
-- **Encryption**: WAL-G supports AES-256 encryption via `WALG_LIBSODIUM_KEY` or PGP. Highly recommended for production.
-- **Monitoring**: Alert if WAL archiving falls behind. The metric `pg_stat_archiver.failed_count` should be 0. Also monitor S3 upload lag.
-- **Base backup vs WAL only**: WAL-G can also take its own base backups (`wal-g backup-push`). You can use either Trilio for Kubernetes OR WAL-G base backups as the restore foundation — they are complementary, not exclusive.
+`nuke` deletes the OBC first so NooBaa purges the bucket. Old WAL segments from a
+previous run would otherwise conflict with new ones.

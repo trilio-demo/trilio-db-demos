@@ -1,0 +1,35 @@
+apiVersion: triliovault.trilio.io/v1
+kind: Hook
+metadata:
+  name: postgres-restore-hook
+spec:
+  # ─── POST-RESTORE HOOK ───────────────────────────────────────────────────────
+  #
+  # Runs after the restore is complete and the pod is running.
+  # Creates a restore_log table (if it does not exist) and inserts a row
+  # recording the time and the fact that a Trilio restore occurred.
+  #
+  # This is intentionally innocuous — it does not modify application data and
+  # is safe to run multiple times. The restore_log table persists across backups
+  # and restores, providing an audit trail of recovery events.
+  #
+  # No pre-hook: Trilio does not run pre-hooks on restore.
+  #
+  post:
+    execAction:
+      command:
+        - "bash"
+        - "-c"
+        - |
+          PGPASSWORD=$POSTGRES_PASSWORD psql -h localhost -U $POSTGRES_USER -d $POSTGRES_DB -c "
+            CREATE TABLE IF NOT EXISTS restore_log (
+              id          SERIAL PRIMARY KEY,
+              restored_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              note        TEXT
+            );
+            INSERT INTO restore_log (note)
+              VALUES ('Trilio restore completed at ' || NOW());
+          "
+    ignoreFailure: true   # Restore is already complete — log failure is non-critical
+    maxRetryCount: 2
+    timeoutSeconds: 30

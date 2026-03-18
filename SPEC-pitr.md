@@ -152,15 +152,36 @@ also pipe through `envsubst` (same pattern as `kapply`).
 
 ---
 
-## Implementation Order
+## Implementation Status
 
-| # | Requirement | Depends on |
-|---|-------------|------------|
-| 1 | REQ-1: OBC manifest | — |
-| 2 | REQ-2: walg-config secret (scripted from OBC output) | REQ-1 |
-| 3 | REQ-3: Fix sidecar patch (postgres container env vars) | — |
-| 4 | REQ-4: Apply sidecar patch | REQ-2, REQ-3 |
-| 5 | REQ-5: Verify archiving | REQ-4 |
-| 6 | REQ-6: pitr-restore command in test.sh | REQ-5 |
-| 7 | REQ-7: Checker update | REQ-6 |
-| 8 | REQ-8: DEMO_NS cleanup in patch | REQ-3 |
+| # | Requirement | Status | Notes |
+|---|-------------|--------|-------|
+| 1 | REQ-1: OBC manifest | ✅ Done | `postgres/pitr/01-obc.yaml` |
+| 2 | REQ-2: walg-config secret | ✅ Done | `02-walg-secret.sh`; automated in `deploy` |
+| 3 | REQ-3: Fix sidecar patch (postgres container env vars) | ✅ Done | Replaced sidecar with init containers |
+| 4 | REQ-4: Apply sidecar patch | ✅ Done | Automated in `./test.sh deploy postgres` |
+| 5 | REQ-5: Verify archiving | ✅ Done | `deploy` polls `pg_stat_archiver` and confirms |
+| 6 | REQ-6: pitr-restore command | ✅ Done | Uses debug pod + transform; see below |
+| 7 | REQ-7: Checker update for PITR | ⏳ Pending | |
+| 8 | REQ-8: DEMO_NS cleanup in patch | ✅ Done | envsubst applied at patch time |
+
+### REQ-6 Implementation Notes
+
+The original spec described a `kubectl exec`-based approach. The actual implementation
+uses a more robust pattern discovered during testing:
+
+**Trilio restore transform** — the Restore CR includes a `transformComponents` patch
+that sets the StatefulSet to 0 replicas. PostgreSQL never starts in normal mode after
+restore. This prevents the WAL timeline contamination that occurs when postgres writes a
+normal-startup checkpoint before `recovery.signal` is in place.
+
+**Debug pod config injection** — `pitr-restore` spins up a temporary `postgres:17` pod
+mounting the same PVC and writes `recovery.signal` + `restore_command` directly to
+`$PGDATA` while postgres is down. Then scales to 1. PostgreSQL starts once — in recovery
+mode.
+
+**restore_log audit entry** — written by `pitr-restore` after promotion (not by a
+restore hook, which cannot run when the StatefulSet is at 0 replicas).
+
+See `LESSONS-LEARNED.md` lessons 10 and 11 for the full failure analysis that led to
+this design.

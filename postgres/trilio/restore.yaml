@@ -11,3 +11,48 @@ spec:
       namespace: ${DEMO_NS}   # ← replace with your namespace if different
   restoreFlags:
     skipIfAlreadyExists: true
+
+  # ─── TRANSFORM: scale postgres to 0 during restore ──────────────────────
+  # Trilio restores the PVC but leaves the StatefulSet at 0 replicas.
+  # This prevents postgres from doing a normal startup (which would write a
+  # checkpoint and contaminate the WAL timeline before PITR recovery begins).
+  # Run './test.sh pitr-restore postgres "<target-time>"' after restore to
+  # inject recovery.signal and scale back up.
+  transformComponents:
+    custom:
+      - transformName: scale-down-postgres
+        resources:
+          groupVersionKind:
+            group: apps
+            kind: StatefulSet
+            version: v1
+          objects:
+            - postgres
+        jsonPatches:
+          - op: replace
+            path: /spec/replicas
+            value: 0
+
+  # ─── EXCLUDE WRITER JOB ─────────────────────────────────────────────────
+  # Prevent the writer job (and its configmap) from being restored.
+  # If restored, the writer immediately starts inserting rows, making it
+  # impossible to distinguish snapshot rows from post-restore writes.
+  excludeResourceSelector:
+    gvkSelector:
+      - groupVersionKind:
+          group: batch
+          kind: Job
+          version: v1
+        objects:
+          - postgres-writer
+      - groupVersionKind:
+          kind: ConfigMap
+          version: v1
+        objects:
+          - postgres-writer-script
+
+  # ─── HOOK CONFIGURATION ─────────────────────────────────────────────────
+  # NOTE: No restore hook is configured here. The scale-down transform sets
+  # postgres to 0 replicas, so there is no running pod for a hook to exec into.
+  # The restore_log audit entry is written by './test.sh pitr-restore' after
+  # PostgreSQL has promoted to primary.

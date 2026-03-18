@@ -30,9 +30,17 @@
 #    ./test.sh cycle               delete+restart writers → backup → wipe sts+pvcs → restore → check (skip deploy)
 #    ./test.sh cycle --high-pressure
 #                                  Same but with high-pressure writers
+#    ./test.sh pitr-restore <db> "<target-time>"
+#                                  After a Trilio restore, replay WAL from S3 to target time
+#                                  and promote postgres to primary. Automates recovery.signal,
+#                                  restore_command, and StatefulSet restart.
+#                                    db          = postgres (only postgres supported for PITR)
+#                                    target-time = UTC timestamp e.g. "2026-03-18 17:44:59"
+#                                                  "immediate" = stop at snapshot point, no S3 WAL
+#                                                  omit = replay all available WAL (risky, see docs)
 #
 #  Environment overrides:
-#    NAMESPACE      (default: trilio-db-demo)
+#    NAMESPACE or DEMO_NS   (default: trilio-db-demo — either variable is accepted)
 #    TIMEOUT_READY  pod ready timeout in seconds  (default: 300)
 #    TIMEOUT_BACKUP backup completion timeout     (default: 1800)
 #    TIMEOUT_RESTORE restore completion timeout   (default: 1800)
@@ -41,7 +49,7 @@
 set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
-NS="${NAMESPACE:-trilio-db-demo}"
+NS="${NAMESPACE:-${DEMO_NS:-trilio-db-demo}}"
 export DEMO_NS="$NS"
 BACKUP_NAME=""   # set dynamically in cmd_backup as all-dbs-backup-YYYYMMDD-HHMMSS
 TIMEOUT_READY="${TIMEOUT_READY:-300}"
@@ -231,6 +239,11 @@ cmd_deploy() {
     step "Deploy Trilio hook + BackupPlan"
     kapply_db "$db" "$dir/trilio/hook.yaml"
     kapply_db "$db" "$dir/trilio/backupplan.yaml"
+
+    # PITR setup for postgres: OBC → walg-config secret → sidecar patch → verify archiving
+    if [[ "$db" == "postgres" ]]; then
+      _setup_pitr_postgres
+    fi
 
     div
     summary
@@ -475,8 +488,10 @@ EOF
     wait_tvk restore "$restore_name" "$TIMEOUT_RESTORE" "Completed" || true
   else
     local restore_name="${target}-restore"
+
     kubectl delete restore "$restore_name" -n "$NS" --ignore-not-found > /dev/null 2>&1
     sleep 2
+
     kubectl apply -f - -n "$NS" > /dev/null << EOF
 apiVersion: triliovault.trilio.io/v1
 kind: Restore
@@ -491,13 +506,42 @@ spec:
       namespace: ${NS}
   restoreFlags:
     skipIfAlreadyExists: true
+  excludeResourceSelector:
+    gvkSelector:
+      - groupVersionKind:
+          group: batch
+          kind: Job
+          version: v1
+        objects:
+          - ${target}-writer
+      - groupVersionKind:
+          kind: ConfigMap
+          version: v1
+        objects:
+          - ${target}-writer-script
+  transformComponents:
+    custom:
+      - transformName: scale-down-postgres
+        resources:
+          groupVersionKind:
+            group: apps
+            kind: StatefulSet
+            version: v1
+          objects:
+            - ${target}
+        jsonPatches:
+          - op: replace
+            path: /spec/replicas
+            value: 0
 EOF
     pass "Applied restore ${restore_name} from ${latest_backup}"
     wait_tvk restore "$restore_name" "$TIMEOUT_RESTORE" "Completed" || true
+    info "postgres is at 0 replicas — run './test.sh pitr-restore postgres \"<target-time>\"' to complete recovery"
   fi
 
   step "Waiting for StatefulSets to recover"
   for db in "${dbs_to_restore[@]}"; do
+    [[ "$db" == "postgres" ]] && continue   # postgres stays down until pitr-restore
     wait_sts_ready "$db" || true
   done
 
@@ -697,6 +741,13 @@ cmd_nuke() {
     return 0
   fi
 
+  # Step 0: delete OBC so NooBaa purges the WAL archive bucket
+  if kubectl get obc postgres-wal-archive -n "$NS" > /dev/null 2>&1; then
+    step "Deleting OBC postgres-wal-archive (NooBaa will purge WAL bucket contents)"
+    kubectl delete obc postgres-wal-archive -n "$NS" > /dev/null 2>&1
+    pass "OBC deleted — WAL bucket will be purged by NooBaa"
+  fi
+
   # Step 1: delete backups first so Trilio can clean S3/NFS
   cmd_delete_backups
 
@@ -864,6 +915,11 @@ _cmd_full_solo() {
   kapply_db "$db" "$dir/trilio/hook.yaml"
   kapply_db "$db" "$dir/trilio/backupplan.yaml"
 
+  # PITR setup for postgres: OBC → walg-config secret → sidecar patch → verify archiving
+  if [[ "$db" == "postgres" ]]; then
+    _setup_pitr_postgres
+  fi
+
   # SQL Server: wait until demodb has at least 100 rows before backing up
   if [[ "$db" == "sqlserver" ]]; then
     local ss_pass ss_rows ss_wait=0
@@ -913,13 +969,16 @@ _cmd_full_solo() {
   step "Wiping $db workload (simulating disaster)"
   _cleanup_db "$db"
 
-  # Restore using the individual restore.yaml
+  # Restore using the individual restore.yaml (and restore hook if present)
   local restore_name
   restore_name=$(grep '^  name:' "$dir/trilio/restore.yaml" | head -1 | awk '{print $2}')
   step "Restoring: $restore_name (individual restore.yaml)"
+  if [[ -f "$dir/trilio/restore-hook.yaml" ]]; then
+    kapply_db "$db" "$dir/trilio/restore-hook.yaml"
+  fi
   kubectl delete restore "$restore_name" -n "$NS" --ignore-not-found > /dev/null 2>&1
   sleep 2
-  kubectl apply -f "$dir/trilio/restore.yaml" -n "$NS" > /dev/null
+  envsubst '${DEMO_NS}' < "$dir/trilio/restore.yaml" | kubectl apply -f - -n "$NS" > /dev/null
   pass "Applied restore $restore_name"
   wait_tvk restore "$restore_name" "$TIMEOUT_RESTORE" "Completed" || true
 
@@ -950,6 +1009,306 @@ _cmd_full_solo() {
   else
     fail "$db solo E2E — TIMEOUT after ${TIMEOUT_CHECK}s"
   fi
+
+  div
+  summary
+}
+
+# ── PITR setup: OBC → walg-config secret → sidecar patch ────────────────────
+# Called automatically by cmd_deploy when target is postgres.
+_setup_pitr_postgres() {
+  local pitr_dir="$SCRIPT_DIR/postgres/pitr"
+
+  step "PITR setup: applying ObjectBucketClaim"
+  envsubst '${DEMO_NS}' < "$pitr_dir/01-obc.yaml" | kubectl apply -f - -n "$NS" > /dev/null 2>&1
+  pass "OBC postgres-wal-archive applied"
+
+  step "PITR setup: waiting for OBC to be Bound"
+  local elapsed=0
+  while true; do
+    local phase
+    phase=$(kubectl get obc postgres-wal-archive -n "$NS" \
+      -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+    if [[ "$phase" == "Bound" ]]; then
+      pass "OBC postgres-wal-archive is Bound"
+      break
+    fi
+    if (( elapsed >= 120 )); then
+      fail "OBC postgres-wal-archive did not reach Bound after 120s (phase: ${phase:-unknown})"
+      return 1
+    fi
+    sleep 5; (( elapsed += 5 ))
+    printf "    %3ds  OBC phase=%s\r" "$elapsed" "${phase:-Pending}"
+  done
+
+  step "PITR setup: creating walg-config secret"
+  local bucket_name access_key secret_key bucket_host bucket_port endpoint
+  bucket_name=$(kubectl get configmap postgres-wal-archive -n "$NS" \
+    -o jsonpath='{.data.BUCKET_NAME}')
+  access_key=$(kubectl get secret postgres-wal-archive -n "$NS" \
+    -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' | base64 -d)
+  secret_key=$(kubectl get secret postgres-wal-archive -n "$NS" \
+    -o jsonpath='{.data.AWS_SECRET_ACCESS_KEY}' | base64 -d)
+  bucket_host=$(kubectl get configmap postgres-wal-archive -n "$NS" \
+    -o jsonpath='{.data.BUCKET_HOST}')
+  bucket_port=$(kubectl get configmap postgres-wal-archive -n "$NS" \
+    -o jsonpath='{.data.BUCKET_PORT}')
+  endpoint="https://${bucket_host}:${bucket_port}"
+
+  kubectl create secret generic walg-config \
+    --from-literal=WALG_S3_PREFIX="s3://${bucket_name}/postgres/wal" \
+    --from-literal=AWS_ENDPOINT="${endpoint}" \
+    --from-literal=AWS_REGION="us-east-1" \
+    --from-literal=AWS_ACCESS_KEY_ID="${access_key}" \
+    --from-literal=AWS_SECRET_ACCESS_KEY="${secret_key}" \
+    --from-literal=AWS_S3_FORCE_PATH_STYLE="true" \
+    -n "$NS" \
+    --dry-run=client -o yaml | kubectl apply -f - > /dev/null 2>&1
+  pass "walg-config secret created (bucket: $bucket_name, endpoint: $endpoint)"
+
+  step "PITR setup: applying WAL-G sidecar patch to StatefulSet"
+  kubectl patch statefulset postgres -n "$NS" \
+    --patch "$(envsubst '${DEMO_NS}' < "$pitr_dir/walg-sidecar-statefulset-patch.yaml")" \
+    > /dev/null 2>&1
+  pass "WAL-G sidecar patch applied — StatefulSet rolling"
+
+  step "PITR setup: waiting for postgres to be ready with WAL-G init containers"
+  wait_sts_ready postgres || return 1
+
+  step "PITR setup: verifying WAL archiving"
+  # Force a WAL segment switch to trigger the first archive
+  kubectl exec postgres-0 -n "$NS" -c postgres -- \
+    psql -U demouser -d demodb -c "SELECT pg_switch_wal();" > /dev/null 2>&1 || true
+
+  local arch_elapsed=0
+  while true; do
+    local archived failed
+    archived=$(kubectl exec postgres-0 -n "$NS" -c postgres -- \
+      psql -U demouser -d demodb -t -A \
+      -c "SELECT archived_count FROM pg_stat_archiver;" 2>/dev/null || echo "0")
+    failed=$(kubectl exec postgres-0 -n "$NS" -c postgres -- \
+      psql -U demouser -d demodb -t -A \
+      -c "SELECT failed_count FROM pg_stat_archiver;" 2>/dev/null || echo "0")
+    if [[ "${archived:-0}" -ge 1 && "${failed:-0}" -eq 0 ]]; then
+      pass "WAL archiving confirmed (archived_count=${archived}, failed_count=${failed})"
+      break
+    fi
+    if [[ "${failed:-0}" -gt 0 ]]; then
+      fail "WAL archiving failed (archived_count=${archived}, failed_count=${failed})"
+      warn "Check: kubectl logs postgres-0 -n $NS -c postgres | grep -i 'archive\\|wal-g\\|ERROR'"
+      return 1
+    fi
+    if (( arch_elapsed >= 120 )); then
+      warn "WAL archiving not yet confirmed after 120s — check pg_stat_archiver manually"
+      break
+    fi
+    sleep 5; (( arch_elapsed += 5 ))
+    printf "    %3ds  archived=%s failed=%s\r" "$arch_elapsed" "${archived:-0}" "${failed:-0}"
+  done
+}
+
+# ── PITR restore: replay WAL from S3 after a Trilio restore ──────────────────
+#
+# Flow:
+#   1. Trilio restore uses a transform to leave postgres at 0 replicas
+#   2. pitr-restore applies the WAL-G sidecar patch (so init containers run on startup)
+#   3. A debug pod writes recovery.signal + recovery config directly to the PVC
+#      while postgres is still down — postgres never runs in normal mode post-restore
+#   4. Scale postgres to 1 — it starts once, in recovery mode (Phase 1 + Phase 2)
+#   5. Wait for promotion and verify
+#
+cmd_pitr_restore() {
+  local db="${1:-postgres}"
+  local target_time="${2:-}"   # UTC timestamp, "immediate", or omit for all available WAL
+
+  [[ "$db" != "postgres" ]] && die "pitr-restore currently only supports postgres"
+
+  local pgdata="/var/lib/postgresql/data/pgdata"
+  local pvc="postgres-data-postgres-0"
+  local debug_pod="pitr-config-writer"
+
+  div
+  echo -e "${BOLD}  PITR RESTORE — $db${NC}"
+  if [[ "$target_time" == "immediate" ]]; then
+    echo -e "  Target      : immediate (stop at first consistent state — snapshot point only)"
+    warn "immediate mode recovers only to the snapshot point — no S3 WAL will be replayed"
+  elif [[ -n "$target_time" ]]; then
+    echo -e "  Target time : $target_time UTC"
+  else
+    echo -e "  Target time : (none — replaying all available WAL to latest state)"
+    warn "Omitting target time replays ALL available WAL — the last segment may be incomplete."
+    warn "Prefer an explicit target time a few seconds before the incident."
+  fi
+  div
+
+  step "Verifying postgres is at 0 replicas (transform should have scaled it down)"
+  local replicas
+  replicas=$(kubectl get sts postgres -n "$NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "unknown")
+  if [[ "$replicas" != "0" ]]; then
+    warn "postgres StatefulSet has replicas=$replicas (expected 0) — scaling down now"
+    kubectl scale sts postgres -n "$NS" --replicas=0 > /dev/null 2>&1
+    local elapsed=0
+    while kubectl get pod postgres-0 -n "$NS" > /dev/null 2>&1; do
+      if (( elapsed >= 120 )); then
+        fail "postgres-0 still running after 120s — cannot safely write recovery config"
+        return 1
+      fi
+      sleep 3; (( elapsed += 3 ))
+      printf "    %3ds  waiting for postgres-0 to terminate...\r" "$elapsed"
+    done
+    echo ""
+  fi
+  pass "postgres is at 0 replicas — PVC is safe to modify"
+
+  step "Applying WAL-G sidecar patch (so init containers install /wal-g/wal-g on startup)"
+  kubectl patch statefulset postgres -n "$NS" \
+    --patch "$(envsubst '${DEMO_NS}' < "$SCRIPT_DIR/postgres/pitr/walg-sidecar-statefulset-patch.yaml")" \
+    > /dev/null 2>&1
+  pass "WAL-G sidecar patch applied"
+
+  step "Ensuring walg-config secret exists"
+  if ! kubectl get secret walg-config -n "$NS" > /dev/null 2>&1; then
+    local bucket_name access_key secret_key bucket_host bucket_port endpoint
+    bucket_name=$(kubectl get configmap postgres-wal-archive -n "$NS" \
+      -o jsonpath='{.data.BUCKET_NAME}' 2>/dev/null || echo "")
+    if [[ -z "$bucket_name" ]]; then
+      die "walg-config secret missing and OBC not found — cannot proceed with PITR"
+    fi
+    access_key=$(kubectl get secret postgres-wal-archive -n "$NS" \
+      -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' | base64 -d)
+    secret_key=$(kubectl get secret postgres-wal-archive -n "$NS" \
+      -o jsonpath='{.data.AWS_SECRET_ACCESS_KEY}' | base64 -d)
+    bucket_host=$(kubectl get configmap postgres-wal-archive -n "$NS" \
+      -o jsonpath='{.data.BUCKET_HOST}')
+    bucket_port=$(kubectl get configmap postgres-wal-archive -n "$NS" \
+      -o jsonpath='{.data.BUCKET_PORT}')
+    endpoint="https://${bucket_host}:${bucket_port}"
+    kubectl create secret generic walg-config \
+      --from-literal=WALG_S3_PREFIX="s3://${bucket_name}/postgres/wal" \
+      --from-literal=AWS_ENDPOINT="${endpoint}" \
+      --from-literal=AWS_REGION="us-east-1" \
+      --from-literal=AWS_ACCESS_KEY_ID="${access_key}" \
+      --from-literal=AWS_SECRET_ACCESS_KEY="${secret_key}" \
+      --from-literal=AWS_S3_FORCE_PATH_STYLE="true" \
+      -n "$NS" \
+      --dry-run=client -o yaml | kubectl apply -f - > /dev/null 2>&1
+    pass "walg-config secret created"
+  else
+    pass "walg-config secret present"
+  fi
+
+  step "Writing recovery config to PVC via debug pod (postgres is down)"
+  # Clean up any leftover debug pod first
+  kubectl delete pod "$debug_pod" -n "$NS" --ignore-not-found > /dev/null 2>&1
+  kubectl run "$debug_pod" -n "$NS" --image=postgres:17 --restart=Never \
+    --overrides="{
+      \"spec\": {
+        \"volumes\": [{\"name\":\"data\",\"persistentVolumeClaim\":{\"claimName\":\"${pvc}\"}}],
+        \"containers\": [{\"name\":\"writer\",\"image\":\"postgres:17\",
+          \"command\":[\"sleep\",\"120\"],
+          \"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/var/lib/postgresql/data\"}]}]
+      }
+    }" > /dev/null 2>&1
+
+  local elapsed=0
+  while true; do
+    local phase
+    phase=$(kubectl get pod "$debug_pod" -n "$NS" \
+      -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+    [[ "$phase" == "Running" ]] && break
+    if (( elapsed >= 60 )); then
+      fail "Debug pod $debug_pod did not start within 60s (phase: ${phase:-unknown})"
+      kubectl delete pod "$debug_pod" -n "$NS" --ignore-not-found > /dev/null 2>&1
+      return 1
+    fi
+    sleep 3; (( elapsed += 3 ))
+    printf "    %3ds  waiting for debug pod...\r" "$elapsed"
+  done
+  echo ""
+  pass "Debug pod running"
+
+  # Build individual echo commands — avoids quoting issues with multi-line variables
+  local write_cmd="pgconf='${pgdata}/postgresql.conf'
+sed -i '/^restore_command/d; /^recovery_target/d' \"\$pgconf\""
+
+  if [[ "$target_time" == "immediate" ]]; then
+    write_cmd+="
+echo \"recovery_target = 'immediate'\" >> \"\$pgconf\"
+echo \"recovery_target_action = 'promote'\" >> \"\$pgconf\""
+  elif [[ -n "$target_time" ]]; then
+    write_cmd+="
+echo \"restore_command = '/wal-g/wal-g wal-fetch %f %p'\" >> \"\$pgconf\"
+echo \"recovery_target_time = '${target_time}+00'\" >> \"\$pgconf\"
+echo \"recovery_target_action = 'promote'\" >> \"\$pgconf\""
+  else
+    write_cmd+="
+echo \"restore_command = '/wal-g/wal-g wal-fetch %f %p'\" >> \"\$pgconf\"
+echo \"recovery_target_action = 'promote'\" >> \"\$pgconf\""
+  fi
+
+  write_cmd+="
+touch '${pgdata}/recovery.signal'
+echo 'Recovery config written:'
+grep -E 'restore_command|recovery_target' \"\$pgconf\" || true
+echo 'recovery.signal present.'"
+
+  kubectl exec "$debug_pod" -n "$NS" -- bash -c "$write_cmd" \
+  && pass "Recovery config and recovery.signal written to PVC" \
+    || { fail "Failed to write recovery config"; kubectl delete pod "$debug_pod" -n "$NS" --ignore-not-found > /dev/null 2>&1; return 1; }
+
+  kubectl delete pod "$debug_pod" -n "$NS" --ignore-not-found > /dev/null 2>&1
+  pass "Debug pod cleaned up"
+
+  step "Scaling postgres to 1 — will start directly in recovery mode"
+  kubectl scale sts postgres -n "$NS" --replicas=1 > /dev/null 2>&1
+  pass "Scale to 1 triggered"
+
+  step "Waiting for pod to be ready"
+  wait_sts_ready postgres || { fail "Pod did not become ready"; return 1; }
+
+  step "Verifying recovery completed and postgres promoted to primary"
+  local elapsed=0 in_recovery
+  while true; do
+    in_recovery=$(kubectl exec "postgres-0" -n "$NS" -c postgres -- \
+      psql -U demouser -d demodb -t -A \
+      -c "SELECT pg_is_in_recovery();" 2>/dev/null || echo "unknown")
+    if [[ "$in_recovery" == "f" ]]; then
+      pass "PostgreSQL promoted to primary (pg_is_in_recovery = f)"
+      break
+    fi
+    if [[ "$in_recovery" == "t" ]]; then
+      info "Still replaying WAL... (pg_is_in_recovery = t)"
+    fi
+    if (( elapsed >= TIMEOUT_RESTORE )); then
+      fail "Timed out waiting for recovery to complete after ${TIMEOUT_RESTORE}s"
+      break
+    fi
+    sleep 10; (( elapsed += 10 ))
+    printf "    %3ds  in_recovery=%s\r" "$elapsed" "$in_recovery"
+  done
+
+  step "Writing restore_log audit entry"
+  local note="PITR recovery completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+  if [[ -n "$target_time" && "$target_time" != "immediate" ]]; then
+    note="PITR recovery to target $target_time completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+  elif [[ "$target_time" == "immediate" ]]; then
+    note="PITR immediate recovery (snapshot point only) completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+  fi
+  kubectl exec "postgres-0" -n "$NS" -c postgres -- \
+    psql -U demouser -d demodb -c "
+      CREATE TABLE IF NOT EXISTS restore_log (
+        id          SERIAL PRIMARY KEY,
+        restored_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        note        TEXT
+      );
+      INSERT INTO restore_log (note) VALUES ('${note}');
+    " > /dev/null 2>&1 && pass "restore_log entry written" || warn "Could not write restore_log entry"
+
+  step "Recovery summary"
+  kubectl exec "postgres-0" -n "$NS" -c postgres -- \
+    psql -U demouser -d demodb \
+    -c "SELECT COUNT(*) AS total_rows, MIN(written_at) AS first_write, MAX(written_at) AS last_write FROM writes_log;" \
+    2>/dev/null || true
 
   div
   summary
@@ -1013,6 +1372,7 @@ done
 
 CMD="${ARGS[0]:-help}"
 ARG2="${ARGS[1]:-all}"
+ARG3="${ARGS[2]:-}"
 
 case "$CMD" in
   deploy)   cmd_deploy  "$ARG2" ;;
@@ -1025,6 +1385,7 @@ case "$CMD" in
   nuke)     cmd_nuke ;;
   full)     cmd_full "$ARG2" ;;
   cycle)    cmd_cycle ;;
+  pitr-restore) cmd_pitr_restore "$ARG2" "$ARG3" ;;
   help|--help|-h)
     sed -n '/^#  Usage:/,/^# ━/p' "$0" | head -25
     ;;
