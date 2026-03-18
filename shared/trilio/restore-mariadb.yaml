@@ -2,13 +2,13 @@ apiVersion: triliovault.trilio.io/v1
 kind: Restore
 metadata:
   name: mariadb-restore
-  namespace: trilio-demo
+  namespace: ${DEMO_NS}
 spec:
   source:
     type: Backup
     backup:
       name: all-dbs-backup
-      namespace: trilio-demo
+      namespace: ${DEMO_NS}
   # skipIfAlreadyExists: the other 3 DBs are still running, their resources
   # already exist and will be skipped. Only the manually-deleted mariadb
   # resources will be restored.

@@ -1,15 +1,9 @@
 # Strategic merge patch — adds WAL-G sidecar to the postgres StatefulSet.
 # Apply with:
-#   kubectl patch statefulset postgres -n trilio-demo \
+#   kubectl patch statefulset postgres -n ${DEMO_NS} \
 #     --patch-file walg-sidecar-statefulset-patch.yaml
 #
-# Prerequisites:
-#   kubectl create secret generic walg-config \
-#     --from-literal=WALG_S3_PREFIX=s3://<bucket>/postgres/wal \
-#     --from-literal=AWS_REGION=<region> \
-#     --from-literal=AWS_ACCESS_KEY_ID=<key> \
-#     --from-literal=AWS_SECRET_ACCESS_KEY=<secret> \
-#     -n trilio-demo
+# Prerequisites: run postgres/pitr/02-walg-secret.sh to create walg-config secret
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -46,6 +40,48 @@ spec:
               mountPath: /var/lib/postgresql/data
 
       containers:
+        # ── postgres container — add S3 env vars and wal-g binary mount ───────
+        # archive_command runs inside this container, so it needs the S3 credentials
+        # and the wal-g binary (copied to /shared by the wal-g sidecar at startup).
+        - name: postgres
+          env:
+            - name: WALG_S3_PREFIX
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config
+                  key: WALG_S3_PREFIX
+            - name: AWS_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config
+                  key: AWS_ENDPOINT
+            - name: AWS_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config
+                  key: AWS_REGION
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: AWS_S3_FORCE_PATH_STYLE
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config
+                  key: AWS_S3_FORCE_PATH_STYLE
+            - name: WALG_COMPRESSION_METHOD
+              value: brotli
+          volumeMounts:
+            - name: wal-g-bin
+              mountPath: /usr/local/bin/wal-g
+              subPath: wal-g
+
         # ── WAL-G sidecar ─────────────────────────────────────────────────────
         # Watches for WAL segments archived by PostgreSQL and ships them to S3.
         # PostgreSQL calls `archive_command` (wal-g wal-push) synchronously;
@@ -68,6 +104,11 @@ spec:
                 secretKeyRef:
                   name: walg-config
                   key: WALG_S3_PREFIX
+            - name: AWS_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config
+                  key: AWS_ENDPOINT
             - name: AWS_REGION
               valueFrom:
                 secretKeyRef:
@@ -83,7 +124,11 @@ spec:
                 secretKeyRef:
                   name: walg-config
                   key: AWS_SECRET_ACCESS_KEY
-            # Compress WAL segments before upload (recommended)
+            - name: AWS_S3_FORCE_PATH_STYLE
+              valueFrom:
+                secretKeyRef:
+                  name: walg-config
+                  key: AWS_S3_FORCE_PATH_STYLE
             - name: WALG_COMPRESSION_METHOD
               value: brotli
           resources:

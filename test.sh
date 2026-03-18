@@ -4,10 +4,13 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
 #  Usage:
-#    ./test.sh deploy              Deploy all 4 databases + writers (1 row/sec, 10k rows)
-#    ./test.sh deploy --high-pressure
+#    ./test.sh deploy [db]         Deploy databases + writers (1 row/sec, 10k rows)
+#                                    db = postgres|mariadb|mongodb|sqlserver|all (default: all)
+#                                    Single DB uses per-DB hook+backupplan; all uses shared backupplan
+#    ./test.sh deploy [db] --high-pressure
 #                                  Deploy with high-pressure writers (10 rows/sec, 50k rows)
-#    ./test.sh backup              Create backup, wait for completion
+#    ./test.sh backup [db]         Create backup, wait for completion
+#                                    db = postgres|mariadb|mongodb|sqlserver|all (default: all)
 #    ./test.sh restore [db]        Cleanup workloads, restore, wait
 #                                    db = postgres|mariadb|mongodb|sqlserver|all (default: all)
 #    ./test.sh check [db]          Run consistency checkers, report pass/fail
@@ -29,7 +32,7 @@
 #                                  Same but with high-pressure writers
 #
 #  Environment overrides:
-#    NAMESPACE      (default: trilio-demo)
+#    NAMESPACE      (default: trilio-db-demo)
 #    TIMEOUT_READY  pod ready timeout in seconds  (default: 300)
 #    TIMEOUT_BACKUP backup completion timeout     (default: 1800)
 #    TIMEOUT_RESTORE restore completion timeout   (default: 1800)
@@ -38,7 +41,8 @@
 set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
-NS="${NAMESPACE:-trilio-demo}"
+NS="${NAMESPACE:-trilio-db-demo}"
+export DEMO_NS="$NS"
 BACKUP_NAME=""   # set dynamically in cmd_backup as all-dbs-backup-YYYYMMDD-HHMMSS
 TIMEOUT_READY="${TIMEOUT_READY:-300}"
 TIMEOUT_BACKUP="${TIMEOUT_BACKUP:-1800}"
@@ -78,25 +82,25 @@ resolve_dbs() {
   fi
 }
 
-# Apply a manifest and report
+# Apply a manifest and report (envsubst replaces ${DEMO_NS} before applying)
 kapply() {
   local file="$1"
-  if kubectl apply -f "$file" -n "$NS" > /dev/null 2>&1; then
+  if envsubst '${DEMO_NS}' < "$file" | kubectl apply -f - -n "$NS" > /dev/null 2>&1; then
     pass "Applied $(basename $file)"
   else
     fail "Failed to apply $(basename $file)"
-    kubectl apply -f "$file" -n "$NS" 2>&1 | sed 's/^/    /'
+    envsubst '${DEMO_NS}' < "$file" | kubectl apply -f - -n "$NS" 2>&1 | sed 's/^/    /'
   fi
 }
 
 # Apply a manifest and prefix output with the DB name
 kapply_db() {
   local db="$1" file="$2"
-  if kubectl apply -f "$file" -n "$NS" > /dev/null 2>&1; then
+  if envsubst '${DEMO_NS}' < "$file" | kubectl apply -f - -n "$NS" > /dev/null 2>&1; then
     pass "[${db}] $(basename $file)"
   else
     fail "[${db}] $(basename $file) — FAILED"
-    kubectl apply -f "$file" -n "$NS" 2>&1 | sed 's/^/    /'
+    envsubst '${DEMO_NS}' < "$file" | kubectl apply -f - -n "$NS" 2>&1 | sed 's/^/    /'
   fi
 }
 
@@ -183,6 +187,57 @@ wait_tvk() {
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 cmd_deploy() {
+  local target="${1:-all}"
+
+  # Single-DB path: deploy one DB with its per-DB hook + backupplan
+  if [[ "$target" != "all" ]]; then
+    [[ ! " ${DBS[*]} " =~ " $target " ]] && die "Unknown database '$target'. Use: postgres|mariadb|mongodb|sqlserver|all"
+    local db="$target" dir="$SCRIPT_DIR/$target"
+
+    div
+    echo -e "${BOLD}  DEPLOY — $db to namespace: $NS${NC}"
+    div
+
+    step "Namespace"
+    kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - > /dev/null 2>&1
+    pass "Namespace $NS ready"
+
+    if [[ "$db" == "sqlserver" ]]; then
+      step "SQL Server SCC (OpenShift anyuid via RoleBinding)"
+      kubectl apply -f "$dir/deploy/00a-serviceaccount.yaml" -n "$NS" > /dev/null 2>&1
+      if kubectl apply -f "$dir/deploy/00b-scc-rolebinding.yaml" -n "$NS" > /dev/null 2>&1; then
+        pass "anyuid SCC RoleBinding applied for sqlserver ServiceAccount"
+      else
+        warn "Could not apply anyuid SCC RoleBinding — SQL Server may fail on OpenShift"
+      fi
+    fi
+
+    step "Deploy: $db"
+    for f in $(ls "$dir/deploy/"*.yaml 2>/dev/null | sort); do
+      kapply "$f"
+    done
+    wait_sts_ready "$db" || true
+
+    step "Deploy writer: $db"
+    kubectl delete job "${db}-writer" -n "$NS" --ignore-not-found > /dev/null 2>&1
+    if [[ "$HIGH_PRESSURE" -eq 1 ]]; then
+      kapply_db "$db" "$dir/writer/writer-configmap-highpressure.yaml"
+      kapply_db "$db" "$dir/writer/writer-job-highpressure.yaml"
+    else
+      kapply_db "$db" "$dir/writer/writer-configmap.yaml"
+      kapply_db "$db" "$dir/writer/writer-job.yaml"
+    fi
+
+    step "Deploy Trilio hook + BackupPlan"
+    kapply_db "$db" "$dir/trilio/hook.yaml"
+    kapply_db "$db" "$dir/trilio/backupplan.yaml"
+
+    div
+    summary
+    return
+  fi
+
+  # All-4-DBs path
   div
   echo -e "${BOLD}  DEPLOY — All 4 databases to namespace: $NS${NC}"
   div
@@ -248,6 +303,52 @@ cmd_deploy() {
 }
 
 cmd_backup() {
+  local target="${1:-all}"
+
+  # Single-DB path: use the per-DB backup.yaml
+  if [[ "$target" != "all" ]]; then
+    [[ ! " ${DBS[*]} " =~ " $target " ]] && die "Unknown database '$target'. Use: postgres|mariadb|mongodb|sqlserver|all"
+    local db="$target" dir="$SCRIPT_DIR/$target"
+
+    div
+    echo -e "${BOLD}  BACKUP — $db${NC}"
+    div
+
+    step "Checking BackupPlan target is configured"
+    if grep -q '<YOUR_TARGET' "$dir/trilio/backupplan.yaml" 2>/dev/null; then
+      die "$db/trilio/backupplan.yaml still has placeholder values. Edit target name/namespace."
+    fi
+    pass "BackupPlan target is configured"
+
+    step "Checking writer"
+    local running succeeded
+    running=$(kubectl get job "${db}-writer" -n "$NS" -o jsonpath='{.status.active}' 2>/dev/null || echo "0")
+    succeeded=$(kubectl get job "${db}-writer" -n "$NS" -o jsonpath='{.status.succeeded}' 2>/dev/null || echo "0")
+    if [[ "${running:-0}" -ge 1 ]]; then
+      pass "Writer job ${db}-writer is active"
+    elif [[ "${succeeded:-0}" -ge 1 ]]; then
+      pass "Writer job ${db}-writer completed (all rows written)"
+    else
+      warn "Writer job ${db}-writer is NOT active — backup will still work but no live writes"
+    fi
+
+    local backup_name
+    backup_name=$(grep '^  name:' "$dir/trilio/backup.yaml" | head -1 | awk '{print $2}')
+    step "Creating backup: $backup_name"
+    kubectl delete backup "$backup_name" -n "$NS" --ignore-not-found > /dev/null 2>&1
+    sleep 2
+    kubectl apply -f "$dir/trilio/backup.yaml" -n "$NS" > /dev/null
+    pass "Applied backup $backup_name"
+
+    step "Waiting for backup to complete"
+    wait_tvk backup "$backup_name" "$TIMEOUT_BACKUP" "Available" || true
+
+    div
+    summary
+    return
+  fi
+
+  # All-4-DBs path
   # Generate a unique timestamp-based name so every run creates a new backup
   BACKUP_NAME="all-dbs-backup-$(date +%Y%m%d-%H%M%S)"
 
@@ -914,8 +1015,8 @@ CMD="${ARGS[0]:-help}"
 ARG2="${ARGS[1]:-all}"
 
 case "$CMD" in
-  deploy)   cmd_deploy ;;
-  backup)   cmd_backup ;;
+  deploy)   cmd_deploy  "$ARG2" ;;
+  backup)   cmd_backup  "$ARG2" ;;
   restore)  cmd_restore "$ARG2" ;;
   check)    cmd_check   "$ARG2" ;;
   status)   cmd_status ;;

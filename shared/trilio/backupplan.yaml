@@ -2,7 +2,7 @@ apiVersion: triliovault.trilio.io/v1
 kind: BackupPlan
 metadata:
   name: all-dbs-backupplan
-  namespace: trilio-demo
+  namespace: ${DEMO_NS}
 spec:
   backupConfig:
     # ─── TARGET ─────────────────────────────────────────────────────────────
@@ -20,7 +20,7 @@ spec:
     hooks:
       - hook:
           name: postgres-hook
-          namespace: trilio-demo
+          namespace: ${DEMO_NS}
         podSelector:
           labels:
             - matchLabels:
@@ -29,7 +29,7 @@ spec:
 
       - hook:
           name: mariadb-hook
-          namespace: trilio-demo
+          namespace: ${DEMO_NS}
         podSelector:
           labels:
             - matchLabels:
@@ -38,7 +38,7 @@ spec:
 
       - hook:
           name: mongodb-hook
-          namespace: trilio-demo
+          namespace: ${DEMO_NS}
         podSelector:
           labels:
             - matchLabels:
@@ -47,7 +47,7 @@ spec:
 
       - hook:
           name: sqlserver-hook
-          namespace: trilio-demo
+          namespace: ${DEMO_NS}
         podSelector:
           labels:
             - matchLabels:

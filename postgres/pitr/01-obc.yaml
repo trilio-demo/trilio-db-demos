@@ -1,0 +1,12 @@
+apiVersion: objectbucket.io/v1alpha1
+kind: ObjectBucketClaim
+metadata:
+  name: postgres-wal-archive
+  namespace: ${DEMO_NS}
+spec:
+  # generateBucketName creates a unique bucket — e.g. postgres-wal-a1b2c3
+  # ODF/NooBaa provisions the bucket and injects credentials as:
+  #   ConfigMap: postgres-wal-archive   (BUCKET_NAME, BUCKET_HOST, BUCKET_PORT)
+  #   Secret:    postgres-wal-archive   (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+  generateBucketName: postgres-wal
+  storageClassName: openshift-storage.noobaa.io

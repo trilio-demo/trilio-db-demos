@@ -2,12 +2,12 @@ apiVersion: triliovault.trilio.io/v1
 kind: Restore
 metadata:
   name: mariadb-inplace-restore
-  namespace: trilio-demo   # ← replace with your namespace if different
+  namespace: ${DEMO_NS}   # ← replace with your namespace if different
 spec:
   source:
     type: Backup
     backup:
       name: mariadb-demo-backup
-      namespace: trilio-demo   # ← replace with your namespace if different
+      namespace: ${DEMO_NS}   # ← replace with your namespace if different
   restoreFlags:
     skipIfAlreadyExists: true

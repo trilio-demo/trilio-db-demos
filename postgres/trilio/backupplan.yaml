@@ -7,7 +7,7 @@ spec:
     # ─── TARGET ─────────────────────────────────────────────────────────────
     # Adapt name and namespace to match your pre-configured Trilio for Kubernetes Target.
     target:
-      name: demo-nfs-target       # ← replace with your Target CR name
+      name: sa-lab-nfs-share1       # ← replace with your Target CR name
       namespace: trilio-system    # ← replace with your Target CR namespace
 
   # ─── HOOK CONFIGURATION ─────────────────────────────────────────────────
@@ -18,7 +18,7 @@ spec:
     hooks:
       - hook:
           name: postgres-hook
-          namespace: trilio-demo   # ← replace with the namespace where you applied the Hook
+          namespace: ${DEMO_NS}
         # Select the pod(s) to run the hook in.
         # This matches the label app=postgres set on the StatefulSet pods.
         podSelector:
