@@ -1076,7 +1076,17 @@ _setup_pitr_postgres() {
   wait_sts_ready postgres || return 1
 
   step "PITR setup: verifying WAL archiving"
-  # Force a WAL segment switch to trigger the first archive
+  # Write a row to guarantee WAL activity, then switch segments twice:
+  # first switch closes the segment containing the write, second confirms
+  # the archiver picked it up (archiver works on completed segments).
+  kubectl exec postgres-0 -n "$NS" -c postgres -- \
+    psql -U demouser -d demodb -c "
+      CREATE TABLE IF NOT EXISTS _wal_probe (ts TIMESTAMPTZ DEFAULT NOW());
+      INSERT INTO _wal_probe DEFAULT VALUES;
+    " > /dev/null 2>&1 || true
+  kubectl exec postgres-0 -n "$NS" -c postgres -- \
+    psql -U demouser -d demodb -c "SELECT pg_switch_wal();" > /dev/null 2>&1 || true
+  sleep 2
   kubectl exec postgres-0 -n "$NS" -c postgres -- \
     psql -U demouser -d demodb -c "SELECT pg_switch_wal();" > /dev/null 2>&1 || true
 
@@ -1099,8 +1109,8 @@ _setup_pitr_postgres() {
       return 1
     fi
     if (( arch_elapsed >= 120 )); then
-      warn "WAL archiving not yet confirmed after 120s — check pg_stat_archiver manually"
-      break
+      fail "WAL archiving not confirmed after 120s — check pg_stat_archiver before proceeding"
+      return 1
     fi
     sleep 5; (( arch_elapsed += 5 ))
     printf "    %3ds  archived=%s failed=%s\r" "$arch_elapsed" "${archived:-0}" "${failed:-0}"

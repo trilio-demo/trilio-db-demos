@@ -141,7 +141,7 @@ kubectl logs postgres-0 -n $DEMO_NS | grep -i "archive\|wal-g\|ERROR"
 
 ---
 
-## 8. Always Specify recovery_target_time — Never Replay All Available WAL
+## 7. Always Specify recovery_target_time — Never Replay All Available WAL
 
 **What happened:** Running `pitr-restore` without a target time caused PostgreSQL to
 replay all available WAL segments from S3. The last archived segment was partially written
@@ -171,7 +171,7 @@ Use a target time that falls safely within the previous segment's range.
 
 ---
 
-## 7. Internal vs External NooBaa Endpoint
+## 8. Internal vs External NooBaa Endpoint
 
 NooBaa exposes two S3 endpoints:
 
@@ -222,7 +222,31 @@ belong to which postgres instance.
 
 ---
 
-## 10. PostgreSQL Must Not Start in Normal Mode After a Trilio Restore
+## 10. WAL Archiving Does Not Start Automatically on a Fresh Deploy
+
+**What happened:** After `./test.sh deploy postgres`, `pg_stat_archiver` showed
+`archived_count = 0` even though the sidecar patch was applied and `archive_mode = on`.
+The writer had already started writing rows with no WAL coverage in S3.
+
+**Why:** PostgreSQL only archives *completed* WAL segments. On a fresh database with
+minimal activity, the current segment may sit open indefinitely — nothing triggers it
+to close and be archived.
+
+**Fix:** The deploy verification step now:
+1. Inserts a dummy row into a `_wal_probe` table to guarantee WAL activity
+2. Calls `pg_switch_wal()` twice — first to close the segment containing the write,
+   second to give the archiver a segment to work on while polling
+3. Fails hard if `archived_count` does not reach ≥ 1 within 120 seconds
+
+This ensures WAL archiving is confirmed working before `deploy` returns. If it fails,
+check `pg_stat_archiver.failed_count` and postgres logs for TLS or connectivity errors.
+
+**Rule of thumb:** Do not start the writer until `deploy` has returned successfully.
+All rows written after a confirmed archive are guaranteed to have WAL coverage in S3.
+
+---
+
+## 11. PostgreSQL Must Not Start in Normal Mode After a Trilio Restore
 
 **What happened:** After a Trilio restore, PostgreSQL started normally (no
 `recovery.signal` present), ran crash recovery from the local WAL in the PVC, and wrote
@@ -266,7 +290,7 @@ atomic operation. Never let postgres start between them.
 
 ---
 
-## 11. Write Recovery Config to the PVC via a Debug Pod, Not kubectl exec
+## 12. Write Recovery Config to the PVC via a Debug Pod, Not kubectl exec
 
 **What happened:** The original `pitr-restore` implementation used `kubectl exec` to
 write `recovery.signal` and `restore_command` into a running postgres container, then
@@ -304,7 +328,7 @@ replicas, a debug pod mounting the PVC is the correct tool — not a rollout res
 
 ---
 
-## 12. The Debug Pod Pattern — Direct PVC Access Without a Running StatefulSet
+## 13. The Debug Pod Pattern — Direct PVC Access Without a Running StatefulSet
 
 When a StatefulSet is scaled to 0, there is no pod to `kubectl exec` into. But the PVC
 still exists and its data is intact. A temporary debug pod mounting the PVC provides
@@ -340,3 +364,27 @@ permissions on the PVC match that UID. A different image may hit permission erro
 **On OpenShift:** the pod may land on a node that applies a different UID via SCC. If
 you hit permission errors, add `"securityContext":{"runAsUser":999}` to the overrides
 (999 is the postgres user UID in the official image).
+
+---
+
+## 14. recovery_target_time Is an Exclusive Boundary
+
+**What happened:** Running `pitr-restore` with target time `2026-03-18 22:29:48`
+(the `written_at` timestamp of row 218) recovered to row 217 — not 218.
+
+**Why:** PostgreSQL treats `recovery_target_time` as an **exclusive** upper bound.
+Transactions that committed *at* the exact target timestamp are not replayed. Only
+transactions committed strictly before it are included.
+
+**Fix:** To include a specific row, add one or two seconds to its `written_at`
+timestamp when specifying the target time:
+
+```bash
+# Row 218 written_at = 2026-03-18 22:29:48
+# To include row 218:
+./test.sh pitr-restore postgres "2026-03-18 22:29:50"
+```
+
+**Rule of thumb:** When targeting a known row, use a timestamp 1-2 seconds *after*
+that row's `written_at`. When targeting a safe recovery point before an incident,
+use a timestamp 1-2 seconds *before* the first bad write.
