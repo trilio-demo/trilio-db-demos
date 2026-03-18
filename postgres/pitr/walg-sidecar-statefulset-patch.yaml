@@ -1,9 +1,15 @@
-# Strategic merge patch — adds WAL-G sidecar to the postgres StatefulSet.
+# Strategic merge patch — adds WAL-G to the postgres StatefulSet.
 # Apply with:
 #   kubectl patch statefulset postgres -n ${DEMO_NS} \
 #     --patch-file walg-sidecar-statefulset-patch.yaml
 #
 # Prerequisites: run postgres/pitr/02-walg-secret.sh to create walg-config secret
+#
+# Design: two init containers run before postgres starts:
+#   1. walg-install  — downloads wal-g binary to a shared emptyDir volume
+#   2. postgres-pitr-init — writes archive_mode config into PGDATA
+# The postgres container mounts the shared volume so archive_command can call wal-g.
+# No sidecar needed — postgres stays 1/1.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -11,9 +17,29 @@ metadata:
 spec:
   template:
     spec:
-      # Share the data volume between postgres and wal-g sidecar
       initContainers:
-        # One-time init: configure archive_mode and archive_command
+        # ── Init 1: download wal-g binary ─────────────────────────────────────
+        # Uses alpine (available on docker.io) to curl the wal-g binary from
+        # GitHub releases and place it on a shared emptyDir volume.
+        # Update WALG_VERSION if a newer release is available:
+        #   https://github.com/wal-g/wal-g/releases
+        - name: walg-install
+          image: alpine:3.19
+          command:
+            - sh
+            - -c
+            - |
+              WALG_VERSION="v3.0.0"
+              WALG_URL="https://github.com/wal-g/wal-g/releases/download/${WALG_VERSION}/wal-g-pg-ubuntu-20.04-amd64"
+              echo "Downloading WAL-G ${WALG_VERSION}..."
+              wget -qO /shared/wal-g "${WALG_URL}"
+              chmod +x /shared/wal-g
+              echo "WAL-G binary installed: $(/shared/wal-g --version)"
+          volumeMounts:
+            - name: wal-g-bin
+              mountPath: /shared
+
+        # ── Init 2: write archive_mode config into PGDATA ─────────────────────
         - name: postgres-pitr-init
           image: postgres:17
           command:
@@ -25,11 +51,10 @@ spec:
               cat > "${CONF_DIR}/pitr.conf" << 'EOF'
               wal_level = replica
               archive_mode = on
-              archive_command = '/usr/local/bin/wal-g wal-push %p'
+              archive_command = '/wal-g/wal-g wal-push %p'
               archive_timeout = 60
               EOF
-              # Include conf.d in postgresql.conf if not already present
-              grep -q "conf.d" "${PGDATA}/postgresql.conf" 2>/dev/null || \
+              grep -q "^include_dir" "${PGDATA}/postgresql.conf" 2>/dev/null || \
                 echo "include_dir = 'conf.d'" >> "${PGDATA}/postgresql.conf"
               echo "PITR configuration written."
           env:
@@ -41,8 +66,7 @@ spec:
 
       containers:
         # ── postgres container — add S3 env vars and wal-g binary mount ───────
-        # archive_command runs inside this container, so it needs the S3 credentials
-        # and the wal-g binary (copied to /shared by the wal-g sidecar at startup).
+        # archive_command runs inside this container and calls /wal-g/wal-g.
         - name: postgres
           env:
             - name: WALG_S3_PREFIX
@@ -77,73 +101,19 @@ spec:
                   key: AWS_S3_FORCE_PATH_STYLE
             - name: WALG_COMPRESSION_METHOD
               value: brotli
+            # CA cert for internal NooBaa S3 service (injected by ODF into every namespace)
+            - name: WALG_S3_CA_CERT_FILE
+              value: /etc/ssl/ocp-service-ca/service-ca.crt
           volumeMounts:
             - name: wal-g-bin
-              mountPath: /usr/local/bin/wal-g
-              subPath: wal-g
-
-        # ── WAL-G sidecar ─────────────────────────────────────────────────────
-        # Watches for WAL segments archived by PostgreSQL and ships them to S3.
-        # PostgreSQL calls `archive_command` (wal-g wal-push) synchronously;
-        # this sidecar provides the wal-g binary on a shared volume.
-        - name: wal-g
-          image: ghcr.io/wal-g/wal-g:v3.0.3-pg17
-          command:
-            - bash
-            - -c
-            - |
-              # Copy wal-g binary to shared location accessible by postgres container
-              cp /usr/local/bin/wal-g /shared/wal-g
-              chmod +x /shared/wal-g
-              echo "WAL-G binary ready. Monitoring for archive activity..."
-              # Keep sidecar alive; actual work is done by wal-g called from postgres
-              tail -f /dev/null
-          env:
-            - name: WALG_S3_PREFIX
-              valueFrom:
-                secretKeyRef:
-                  name: walg-config
-                  key: WALG_S3_PREFIX
-            - name: AWS_ENDPOINT
-              valueFrom:
-                secretKeyRef:
-                  name: walg-config
-                  key: AWS_ENDPOINT
-            - name: AWS_REGION
-              valueFrom:
-                secretKeyRef:
-                  name: walg-config
-                  key: AWS_REGION
-            - name: AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: walg-config
-                  key: AWS_ACCESS_KEY_ID
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: walg-config
-                  key: AWS_SECRET_ACCESS_KEY
-            - name: AWS_S3_FORCE_PATH_STYLE
-              valueFrom:
-                secretKeyRef:
-                  name: walg-config
-                  key: AWS_S3_FORCE_PATH_STYLE
-            - name: WALG_COMPRESSION_METHOD
-              value: brotli
-          resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 500m
-              memory: 256Mi
-          volumeMounts:
-            - name: postgres-data
-              mountPath: /var/lib/postgresql/data
-            - name: wal-g-bin
-              mountPath: /shared
+              mountPath: /wal-g
+            - name: ocp-service-ca
+              mountPath: /etc/ssl/ocp-service-ca
+              readOnly: true
 
       volumes:
         - name: wal-g-bin
           emptyDir: {}
+        - name: ocp-service-ca
+          configMap:
+            name: openshift-service-ca.crt
