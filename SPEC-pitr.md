@@ -45,13 +45,19 @@ the OBC-provisioned secret:
 | Key | Value |
 |-----|-------|
 | `WALG_S3_PREFIX` | `s3://<bucket-name>/postgres/wal` |
-| `AWS_ENDPOINT` | NooBaa S3 endpoint URL from OBC ConfigMap |
+| `AWS_ENDPOINT` | `https://s3.openshift-storage.svc:443` (internal NooBaa service) |
 | `AWS_REGION` | `us-east-1` (NooBaa ignores region but WAL-G requires it) |
 | `AWS_ACCESS_KEY_ID` | From OBC Secret |
 | `AWS_SECRET_ACCESS_KEY` | From OBC Secret |
 | `AWS_S3_FORCE_PATH_STYLE` | `true` (required — NooBaa uses path-style URLs, not virtual-hosted) |
 
-**Acceptance:** Secret exists with all 6 keys
+**TLS note:** Use the internal service endpoint (`s3.openshift-storage.svc:443`), not the
+external route. The external route uses the OCP ingress CA; the internal service uses the
+ODF service CA which is automatically available in every namespace as the
+`openshift-service-ca.crt` ConfigMap. WAL-G will fail with `x509: certificate signed by
+unknown authority` if the wrong endpoint or CA is used.
+
+**Acceptance:** Secret exists with all 6 keys and `AWS_ENDPOINT` points to the internal service
 
 ---
 

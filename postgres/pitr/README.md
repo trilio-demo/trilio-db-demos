@@ -69,18 +69,49 @@ PostgreSQL's `archive_command` calls WAL-G for every completed WAL segment. WAL-
 
 ### 1. Prerequisites
 
-- An S3 bucket (or compatible: MinIO, Ceph, etc.) for WAL storage
+- An S3 bucket (or compatible: MinIO, Ceph/NooBaa, etc.) for WAL storage
 - AWS credentials accessible to the pod (IAM role, secret, or IRSA)
+- **On OpenShift with ODF/NooBaa**: use the internal S3 service endpoint and the
+  OCP service CA cert (see TLS note below)
+
+### TLS Certificate Requirement (OpenShift + ODF)
+
+WAL-G strictly verifies TLS certificates. On OpenShift with ODF/NooBaa:
+
+- Use the **internal** S3 endpoint: `https://s3.openshift-storage.svc:443`
+- Set `AWS_S3_FORCE_PATH_STYLE=true` (NooBaa uses path-style URLs)
+- ODF injects its service CA into every namespace as `openshift-service-ca.crt` ConfigMap
+- The patch mounts this ConfigMap and sets `WALG_S3_CA_CERT_FILE` automatically
+
+Do **not** use the external NooBaa route (`s3-openshift-storage.apps.<cluster>`) — it uses
+the ingress router CA which is not the same as the service CA.
+
+Run `postgres/pitr/02-walg-secret.sh` to create the `walg-config` secret automatically
+from the OBC-provisioned credentials. It reads the internal endpoint from the OBC ConfigMap.
 
 ### 2. Create the WAL-G configuration secret
+
+On OpenShift with ODF, use the provided script after creating the ObjectBucketClaim:
+
+```bash
+# Create the OBC first
+kubectl apply -f postgres/pitr/01-obc.yaml
+
+# Wait for Bound state, then create the secret
+./postgres/pitr/02-walg-secret.sh
+```
+
+For other S3 providers, create the secret manually:
 
 ```bash
 kubectl create secret generic walg-config \
   --from-literal=AWS_ACCESS_KEY_ID=<your-key-id> \
   --from-literal=AWS_SECRET_ACCESS_KEY=<your-secret> \
   --from-literal=AWS_REGION=<your-region> \
+  --from-literal=AWS_ENDPOINT=<your-s3-endpoint> \
+  --from-literal=AWS_S3_FORCE_PATH_STYLE=true \
   --from-literal=WALG_S3_PREFIX=s3://<your-bucket>/postgres/wal \
-  -n trilio-demo
+  -n ${DEMO_NS}
 ```
 
 ### 3. Apply the WAL-G sidecar manifest

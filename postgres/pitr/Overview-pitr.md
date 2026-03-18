@@ -166,6 +166,27 @@ Steps 2–4 are automated by `./test.sh pitr-restore postgres "<target-time>"`.
 |-----------|---------|
 | OpenShift Data Foundation (ODF) | Provides S3-compatible object storage via NooBaa |
 | ObjectBucketClaim | Provisions the WAL archive bucket and credentials |
-| WAL-G sidecar | Ships WAL segments to S3; provides `wal-g` binary to postgres container |
-| walg-config Secret | S3 credentials and endpoint, injected into both containers |
+| WAL-G init container | Downloads `wal-g` binary at pod startup; placed on shared volume for postgres |
+| walg-config Secret | S3 credentials and endpoint, injected into the postgres container |
 | Trilio for Kubernetes | Snapshot-based backup and restore of the full application |
+
+## TLS Certificate Requirement
+
+WAL-G strictly verifies TLS certificates when connecting to S3. On OpenShift with ODF/NooBaa
+this requires explicit CA configuration — WAL-G will fail with
+`x509: certificate signed by unknown authority` otherwise.
+
+**Use the internal NooBaa S3 service endpoint** (`s3.openshift-storage.svc:443`) rather than
+the external route. ODF automatically injects its service CA certificate into every namespace
+as a ConfigMap named `openshift-service-ca.crt`. The `walg-sidecar-statefulset-patch.yaml`
+mounts this ConfigMap and sets `WALG_S3_CA_CERT_FILE` to point WAL-G at it.
+
+```
+WALG_S3_CA_CERT_FILE=/etc/ssl/ocp-service-ca/service-ca.crt
+AWS_ENDPOINT=https://s3.openshift-storage.svc:443
+AWS_S3_FORCE_PATH_STYLE=true   # NooBaa uses path-style URLs, not virtual-hosted
+```
+
+> **Note:** The external NooBaa route (`s3-openshift-storage.apps.<cluster>`) uses the OCP
+> ingress router certificate which is signed by the cluster's ingress CA — not the service CA.
+> Using the internal service endpoint avoids this complexity entirely.
