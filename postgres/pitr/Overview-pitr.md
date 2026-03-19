@@ -5,6 +5,11 @@
 This document describes how Point-In-Time Recovery (PITR) works alongside Trilio for
 Kubernetes to provide near-zero RPO for PostgreSQL on OpenShift.
 
+Trilio's responsibility is a consistent, application-level snapshot at a point in time.
+Getting the database from that snapshot to any later target time is done using
+PostgreSQL's own WAL replay machinery. The two systems are independent — and that
+separation is the architecture.
+
 ---
 
 ## Two Independent Systems, One Recovery Strategy
@@ -17,6 +22,10 @@ complement each other but neither needs to know about the other's internals.
 | Trilio for Kubernetes | Consistent snapshot of the entire application (PVC, Secrets, Services, StatefulSet) | Time since last snapshot |
 | PostgreSQL WAL archiving | Continuous stream of every transaction to S3 | ~60 seconds |
 | **Combined** | **Trilio restores the base; WAL replay fills the gap** | **~60 seconds** |
+
+The dividing line is deliberate: **Trilio ends at the snapshot. PostgreSQL WAL replay
+takes over from there.** The WAL archive must live outside the cluster — in a separate
+failure domain — so that it is available regardless of what happened to the cluster.
 
 ---
 
@@ -72,10 +81,17 @@ Trilio recreates the PVC from the volume snapshot and restores all Kubernetes re
 (StatefulSet, Services, Secrets, ConfigMaps) in a single operation.
 
 **Critical:** The Trilio Restore CR uses a `transformComponents` patch to set the
-StatefulSet to 0 replicas during restore. This prevents PostgreSQL from starting in
-normal mode before recovery configuration is in place. If PostgreSQL were allowed to
-start normally after restore it would write a new checkpoint, contaminating the WAL
-timeline and making Phase 2 impossible.
+StatefulSet to 0 replicas during restore. This holds PostgreSQL at zero replicas so
+that recovery configuration (`recovery.signal`, `restore_command`) can be written into
+`$PGDATA` before the database starts for the first time post-restore.
+
+PostgreSQL must start in recovery mode — not normal mode. If it were allowed to start
+normally first, it would run crash recovery from local WAL and write a new checkpoint.
+That new checkpoint advances the WAL timeline locally, diverging it from the WAL
+segments already archived to S3 against the original timeline. The two become
+incompatible and Phase 2 is unrecoverable. The transform ensures PostgreSQL starts
+exactly once after a restore, already knowing it must replay logs rather than begin
+a new timeline.
 
 **Phase 2 — PostgreSQL replays WAL from S3**
 
@@ -272,6 +288,11 @@ A WAL segment boundary occurs when:
 | Trilio for Kubernetes | Snapshot-based backup and restore of the full application |
 
 All prerequisites are provisioned automatically by `./test.sh deploy postgres`.
+
+> **Production note:** This reference implementation archives WAL to an in-cluster
+> ODF/NooBaa S3 endpoint for simplicity. In a production deployment the WAL archive
+> target must be in a **separate failure domain** — off-cluster and ideally off-site —
+> so that transaction logs are available even if the cluster itself is lost.
 
 ---
 
